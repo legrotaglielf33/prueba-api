@@ -26,8 +26,30 @@ function formatearFecha(iso) {
   return new Date(iso).toLocaleString("es-AR", { dateStyle: "medium", timeStyle: "short" });
 }
 
+// Estas claves se guardan en el servidor (datos/guardados.json) y las ven todos.
+// El resto (sesión, búsquedas en caché, preferencias) queda en este navegador.
+const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo"];
+let datosServidor = {};
+
 const store = {
+  // Trae los datos del servidor. Se llama una vez, antes de mostrar la página.
+  async cargar() {
+    const resp = await fetch("/api/datos");
+    if (!resp.ok) throw new Error(`El servidor respondió ${resp.status}`);
+    datosServidor = await resp.json();
+
+    // Lo que se había guardado en este navegador antes de usar el servidor se sube una vez
+    for (const clave of COMPARTIDAS) {
+      const local = localStorage.getItem(clave);
+      if (local === null) continue;
+      if (!(clave in datosServidor)) this.guardar(clave, JSON.parse(local));
+      localStorage.removeItem(clave);
+    }
+  },
   leer(clave, porDefecto) {
+    if (COMPARTIDAS.includes(clave)) {
+      return clave in datosServidor ? structuredClone(datosServidor[clave]) : porDefecto;
+    }
     try {
       const valor = localStorage.getItem(clave);
       return valor ? JSON.parse(valor) : porDefecto;
@@ -36,7 +58,30 @@ const store = {
     }
   },
   guardar(clave, valor) {
-    localStorage.setItem(clave, JSON.stringify(valor));
+    if (!COMPARTIDAS.includes(clave)) {
+      localStorage.setItem(clave, JSON.stringify(valor));
+      return;
+    }
+    datosServidor[clave] = structuredClone(valor);
+    fetch(`/api/datos/${clave}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(valor),
+    }).then((resp) => {
+      if (!resp.ok) throw new Error(`El servidor respondió ${resp.status}`);
+    }).catch((err) => {
+      console.error(err);
+      alert("No se pudo guardar el cambio en el servidor.");
+    });
+  },
+  borrar(clave) {
+    if (!COMPARTIDAS.includes(clave)) {
+      localStorage.removeItem(clave);
+      return;
+    }
+    delete datosServidor[clave];
+    fetch(`/api/datos/${clave}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: "null" })
+      .catch((err) => console.error(err));
   },
 };
 
@@ -87,7 +132,7 @@ async function resolverId(entrada) {
 }
 
 // ---------------------------------------------------------------
-//  Usuarios y sesión (guardados en localStorage)
+//  Usuarios (guardados en el servidor) y sesión (en este navegador)
 // ---------------------------------------------------------------
 // Cuentas creadas desde "Crear cuenta" (las de versiones viejas no eran una lista y se descartan)
 function usuariosLocales() {
@@ -106,7 +151,8 @@ const auth = {
   },
   esAdmin() {
     const usuario = this.usuarioActual();
-    return Boolean(usuario) && buscarUsuario(usuario)?.rol === "admin";
+    // Sólo los de datos/usuarios.js pueden ser admin (las cuentas creadas nunca lo son)
+    return Boolean(usuario) && USUARIOS.some((u) => u.usuario === usuario && u.rol === "admin");
   },
   registrar(usuario, clave) {
     if (buscarUsuario(usuario)) throw new Error("Ese usuario ya existe.");
@@ -168,7 +214,7 @@ const comentarios = {
 
 // ---------------------------------------------------------------
 //  Catálogo y tags: lo de datos/ + los cambios de los administradores
-//  (los cambios se guardan en el navegador; se pueden exportar desde #/admin)
+//  (los cambios se guardan en el servidor; se pueden exportar desde #/admin)
 // ---------------------------------------------------------------
 function normalizarTag(texto) {
   return String(texto ?? "").trim().toLowerCase().replace(/^#/, "").replace(/\s+/g, "-");
@@ -778,13 +824,13 @@ async function vistaAdmin() {
     <section class="seccion panel">
       <h2>Guardar en los archivos</h2>
       <p class="suave">
-        Los cambios del panel se guardan en este navegador. Para que sean permanentes y los vea todo el mundo,
-        descargá los archivos y reemplazá los de la carpeta <code>datos/</code>. Después podés descartar los cambios locales.
+        Los cambios del panel se guardan en el servidor (<code>datos/guardados.json</code>) y los ven todos.
+        Si querés pasarlos a los archivos de <code>datos/</code>, descargalos y reemplazá los de esa carpeta. Después podés descartar los cambios.
       </p>
       <div class="fila-form">
         <button class="btn" id="exportar-peliculas">Descargar peliculas.js</button>
         <button class="btn" id="exportar-tags">Descargar tags.js</button>
-        <button class="btn secundario" id="descartar-cambios">Descartar cambios locales</button>
+        <button class="btn secundario" id="descartar-cambios">Descartar cambios</button>
       </div>
     </section>`;
 }
@@ -885,9 +931,9 @@ function eventosAdmin() {
   document.getElementById("exportar-peliculas").onclick = exportarPeliculas;
   document.getElementById("exportar-tags").onclick = exportarTags;
   document.getElementById("descartar-cambios").onclick = () => {
-    if (!confirm("¿Descartar los cambios guardados en este navegador? Quedará lo que dicen los archivos de datos/.")) return;
-    localStorage.removeItem("catalogo");
-    localStorage.removeItem("tags_admin");
+    if (!confirm("¿Descartar los cambios guardados en el servidor? Quedará lo que dicen los archivos de datos/.")) return;
+    store.borrar("catalogo");
+    store.borrar("tags_admin");
     renderMenu();
     recargar();
   };
@@ -933,7 +979,7 @@ function vistaLogin() {
         <button class="btn" id="btn-enviar">Ingresar</button>
       </form>
       <p class="suave" style="font-size:.8rem;margin-bottom:0">
-        Las cuentas se guardan sólo en este navegador (demo sin servidor).
+        Las cuentas se guardan en el servidor.
       </p>
     </div>`;
 }
@@ -1094,5 +1140,16 @@ window.addEventListener("hashchange", () => {
   router();
 });
 
-renderZonaUsuario();
-router();
+store.cargar()
+  .then(() => {
+    renderZonaUsuario();
+    router();
+  })
+  .catch((err) => {
+    console.error(err);
+    app.innerHTML = `
+      <div class="aviso error">
+        No se pudo conectar con el servidor. Inicialo con <code>node servidor.js</code>
+        y abrí <a href="http://localhost:3000" style="color:var(--acento)">http://localhost:3000</a>.
+      </div>`;
+  });

@@ -2,16 +2,15 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Abrir El \"Santi\"-Grial en Edge",
-      "type": "msedge",
+      "name": "Iniciar El \"Santi\"-Grial (servidor + navegador)",
+      "type": "node",
       "request": "launch",
-      "file": "${workspaceFolder}/index.html"
-    },
-    {
-      "name": "Abrir El \"Santi\"-Grial en Chrome",
-      "type": "chrome",
-      "request": "launch",
-      "file": "${workspaceFolder}/index.html"
+      "program": "${workspaceFolder}/servidor.js",
+      "serverReadyAction": {
+        "pattern": "http://localhost:([0-9]+)",
+        "uriFormat": "http://localhost:%s",
+        "action": "openExternally"
+      }
     }
   ]
 }
