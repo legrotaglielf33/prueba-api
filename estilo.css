@@ -649,3 +649,17 @@ select:focus { outline: none; border-color: var(--acento); }
 .nota-ranking strong { display: block; font-size: 1.3rem; }
 .nota-ranking span { font-size: .75rem; color: var(--suave); }
 a.fila-admin:hover { box-shadow: 0 0 0 1px var(--acento); }
+
+/* ---------- Pestañas de tags (películas y series / música) ---------- */
+.pestanas-tags { display: flex; gap: 4px; margin: 0 0 28px; border-bottom: 2px solid var(--panel-2); }
+.pestanas-tags a {
+  padding: 10px 18px;
+  border-radius: 8px 8px 0 0;
+  color: var(--suave);
+  font-weight: 600;
+  margin-bottom: -2px;
+  border-bottom: 2px solid transparent;
+}
+.pestanas-tags a:hover { color: var(--texto); background: var(--panel); }
+.pestanas-tags a.activa { color: var(--acento); border-bottom-color: var(--acento); background: var(--panel); }
+.carrusel .tarjeta.disco { scroll-snap-align: start; }

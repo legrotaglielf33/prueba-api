@@ -38,7 +38,7 @@ function yaSalio(fecha) {
 
 // Estas claves se guardan en el servidor (datos/guardados.json) y las ven todos.
 // El resto (sesión, búsquedas en caché, preferencias) queda en este navegador.
-const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos"];
+const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos", "tags_musica"];
 let datosServidor = {};
 
 const store = {
@@ -1492,12 +1492,13 @@ function datalistTags() {
 // ---------- Índice de tags: una fila con carrusel por cada tag ----------
 const CANTIDAD_CARRUSEL = 12;
 
-function carrusel(obras, total, rutaTodas) {
+// dibujar: cómo se muestra cada elemento (por defecto, tarjetas de películas y series)
+function carrusel(obras, total, rutaTodas, dibujar = (o) => tarjeta(o)) {
   return `
     <div class="carrusel">
       <button class="flecha anterior" data-mover="-1" aria-label="Anterior">‹</button>
       <div class="pista">
-        ${obras.map((o) => tarjeta(o)).join("")}
+        ${obras.map(dibujar).join("")}
         ${total > obras.length ? `
           <a class="tarjeta ver-todas" href="${rutaTodas}">
             <span>Ver todas<br><strong>${total}</strong></span>
@@ -1505,6 +1506,15 @@ function carrusel(obras, total, rutaTodas) {
       </div>
       <button class="flecha siguiente" data-mover="1" aria-label="Siguiente">›</button>
     </div>`;
+}
+
+// Pestañas entre los tags de películas y series y los de música
+function pestanasTags(activa) {
+  return `
+    <nav class="pestanas-tags">
+      <a class="${activa === "cine" ? "activa" : ""}" href="#/tags">🎬 Películas y series</a>
+      <a class="${activa === "musica" ? "activa" : ""}" href="#/tags/musica">🎵 Música</a>
+    </nav>`;
 }
 
 async function vistaTags() {
@@ -1519,6 +1529,7 @@ async function vistaTags() {
   return `
     <section class="seccion">
       <h2>Tags</h2>
+      ${pestanasTags("cine")}
       ${filas.map(({ tag, obras, detalles }) => {
         const ruta = `#/tag/${encodeURIComponent(tag)}`;
         return `
@@ -2456,6 +2467,7 @@ async function vistaAlbum(mbid) {
           ${rg.releases.length > 1 ? `<span>${rg.releases.length} ediciones</span>` : ""}
         </div>
         <div class="tags">${generos.map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}</div>
+        ${bloqueTagsMusica(mbid)}
         ${bloquePuntajes(claveDisco(mbid), rg.rating?.value, rg.rating?.["votes-count"], { nombre: "MusicBrainz", maximo: 5 })}
         <div class="tags">
           <a class="tag" href="https://musicbrainz.org/release-group/${mbid}" target="_blank" rel="noopener">MusicBrainz ↗</a>
@@ -2483,6 +2495,7 @@ async function vistaAlbum(mbid) {
 
 function eventosAlbum(mbid) {
   eventosOpiniones(claveDisco(mbid));
+  eventosTagsMusica(mbid);
 }
 
 async function vistaCharts(decada = "") {
@@ -2512,6 +2525,182 @@ function eventosCharts() {
   if (decada) decada.onchange = () => {
     location.hash = decada.value ? `#/musica/charts/${decada.value}` : "#/musica/charts";
   };
+}
+
+// ---------- Tags de música (los asignan los admins en la página de cada disco) ----------
+const tagsMusica = {
+  // { tags: { [nombre]: { descripcion } }, discos: { [mbid]: [tags] } }
+  datos() {
+    const datos = store.leer("tags_musica", {});
+    return { tags: datos.tags ?? {}, discos: datos.discos ?? {} };
+  },
+  todas() {
+    return this.datos().tags;
+  },
+  deDisco(mbid) {
+    return this.datos().discos[mbid] ?? [];
+  },
+  discosDe(tag) {
+    return Object.entries(this.datos().discos).filter(([, tags]) => tags.includes(tag)).map(([mbid]) => mbid);
+  },
+  crear(nombre, descripcion = "") {
+    const datos = this.datos();
+    datos.tags[nombre] = { descripcion };
+    store.guardar("tags_musica", datos);
+  },
+  borrar(nombre) {
+    const datos = this.datos();
+    delete datos.tags[nombre];
+    for (const [mbid, tags] of Object.entries(datos.discos)) {
+      datos.discos[mbid] = tags.filter((t) => t !== nombre);
+      if (!datos.discos[mbid].length) delete datos.discos[mbid];
+    }
+    store.guardar("tags_musica", datos);
+  },
+  // Si el tag no existe, se crea
+  agregar(mbid, tag) {
+    const datos = this.datos();
+    datos.tags[tag] ??= { descripcion: "" };
+    datos.discos[mbid] = [...new Set([...(datos.discos[mbid] ?? []), tag])];
+    store.guardar("tags_musica", datos);
+  },
+  quitar(mbid, tag) {
+    const datos = this.datos();
+    datos.discos[mbid] = (datos.discos[mbid] ?? []).filter((t) => t !== tag);
+    if (!datos.discos[mbid].length) delete datos.discos[mbid];
+    store.guardar("tags_musica", datos);
+  },
+};
+
+function rutaTagMusica(tag) {
+  return `#/tags/musica/${encodeURIComponent(tag)}`;
+}
+
+// Tarjeta de un disco a partir de los datos guardados en "discos"
+function tarjetaDiscoGuardado(mbid) {
+  const disco = discos.de(mbid);
+  return tarjetaDisco(mbid, disco ? { ...disco, artistas: nombreArtistas(disco) } : { titulo: "Disco" });
+}
+
+function cantidadDiscos(n) {
+  return `${n} ${n === 1 ? "disco" : "discos"}`;
+}
+
+// Tags del disco y, para los admins, el formulario para editarlos
+function bloqueTagsMusica(mbid) {
+  const admin = auth.esAdmin();
+  const tags = tagsMusica.deDisco(mbid);
+  return `
+    <div class="tags">
+      ${tags.map((t) => `
+        <span class="tag especial">
+          <a href="${rutaTagMusica(t)}">#${escapar(t)}</a>
+          ${admin ? `<button class="quitar-tag" data-quitar-tag-musica="${escapar(t)}" title="Quitar tag">✕</button>` : ""}
+        </span>`).join("")}
+    </div>
+    ${admin ? `
+      <form class="fila-form" id="form-tag-musica">
+        <input type="text" name="tag" list="lista-tags-musica" placeholder="Agregar tag de música…" required>
+        <datalist id="lista-tags-musica">
+          ${Object.keys(tagsMusica.todas()).map((t) => `<option value="${escapar(t)}">`).join("")}
+        </datalist>
+        <button class="btn chico">+ Tag</button>
+      </form>` : ""}`;
+}
+
+function eventosTagsMusica(mbid) {
+  if (!auth.esAdmin()) return;
+  document.getElementById("form-tag-musica").onsubmit = (e) => {
+    e.preventDefault();
+    const tag = normalizarTag(e.target.elements.tag.value);
+    if (!tag) return;
+    tagsMusica.agregar(mbid, tag);
+    recargar();
+  };
+  document.querySelectorAll("[data-quitar-tag-musica]").forEach((b) => {
+    b.onclick = () => {
+      tagsMusica.quitar(mbid, b.dataset.quitarTagMusica);
+      recargar();
+    };
+  });
+}
+
+function vistaTagsMusica() {
+  const tags = tagsMusica.todas();
+  document.title = `Tags de música · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion">
+      <h2>Tags</h2>
+      ${pestanasTags("musica")}
+      ${Object.entries(tags).map(([tag, info]) => {
+        const ruta = rutaTagMusica(tag);
+        const mbids = tagsMusica.discosDe(tag);
+        return `
+          <div class="fila-tag">
+            <h3>
+              <a class="tag especial grande" href="${ruta}">#${escapar(tag)}</a>
+              <span class="suave">${mbids.length ? cantidadDiscos(mbids.length) : ""}</span>
+              ${mbids.length ? `<a class="ver-tag" href="${ruta}">Ver todos →</a>` : ""}
+            </h3>
+            ${info.descripcion ? `<p class="suave">${escapar(info.descripcion)}</p>` : ""}
+            ${mbids.length
+              ? carrusel(mbids.slice(0, CANTIDAD_CARRUSEL), mbids.length, ruta, tarjetaDiscoGuardado)
+              : `<p class="suave">Todavía no hay discos con este tag.</p>`}
+          </div>`;
+      }).join("") || `
+        <p class="suave">
+          Todavía no hay tags de música.
+          ${auth.esAdmin() ? `Creá uno en <a href="#/admin" style="color:var(--acento)">Admin</a> o agregáselo a un disco desde su página.` : ""}
+        </p>`}
+    </section>`;
+}
+
+const ORDENES_TAG_MUSICA = {
+  anio: "Año",
+  titulo: "Título",
+  artista: "Artista",
+  puntaje: "Puntaje del sitio",
+};
+
+function vistaTagMusica(tag) {
+  tag = normalizarTag(decodeURIComponent(tag));
+  const orden = store.leer("orden_tag_musica", "anio");
+  const promedio = (mbid) => ratings.promedio(claveDisco(mbid))?.valor ?? 0;
+  const dato = (mbid) => discos.de(mbid) ?? { titulo: "", artistas: [], anio: null };
+  const comparar = {
+    anio: (a, b) => (dato(a).anio ?? "9999").localeCompare(dato(b).anio ?? "9999"),
+    titulo: (a, b) => dato(a).titulo.localeCompare(dato(b).titulo),
+    artista: (a, b) => nombreArtistas(dato(a)).localeCompare(nombreArtistas(dato(b))),
+    puntaje: (a, b) => promedio(b) - promedio(a),
+  }[orden];
+  const mbids = tagsMusica.discosDe(tag).sort(comparar);
+  const descripcion = tagsMusica.todas()[tag]?.descripcion;
+  document.title = `#${tag} · Música · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion">
+      <p class="miga"><a href="#/tags/musica">Tags de música</a></p>
+      <h2>#${escapar(tag)} <span class="suave" style="font-size:1rem">${cantidadDiscos(mbids.length)}</span></h2>
+      ${descripcion ? `<p class="suave">${escapar(descripcion)}</p>` : ""}
+      ${mbids.length > 1 ? `
+        <div class="controles">
+          <label>Ordenar por
+            <select id="orden-tag-musica">
+              ${Object.entries(ORDENES_TAG_MUSICA).map(([valor, texto]) =>
+                `<option value="${valor}" ${orden === valor ? "selected" : ""}>${texto}</option>`).join("")}
+            </select>
+          </label>
+        </div>` : ""}
+      ${mbids.length
+        ? `<div class="grilla">${mbids.map(tarjetaDiscoGuardado).join("")}</div>`
+        : `<p class="suave">No hay discos con este tag.</p>`}
+    </section>`;
+}
+
+function eventosTagMusica() {
+  const orden = document.getElementById("orden-tag-musica");
+  if (orden) orden.onchange = () => { store.guardar("orden_tag_musica", orden.value); recargar(); };
 }
 
 // ---------- Panel de administración ----------
@@ -2653,6 +2842,24 @@ async function vistaAdmin() {
     </section>
 
     <section class="seccion panel">
+      <h2>Tags de música</h2>
+      <p class="suave nota">Para agregarle un tag a un disco, entrá a su página desde <a href="#/musica" style="color:var(--acento)">Música</a>.</p>
+      <div class="lista-admin">
+        ${Object.entries(tagsMusica.todas()).map(([t, info]) => `
+          <div class="fila-admin">
+            <a class="tag especial" href="${rutaTagMusica(t)}">#${escapar(t)}</a>
+            <span class="suave crece">${escapar(info.descripcion || "Sin descripción")} · ${cantidadDiscos(tagsMusica.discosDe(t).length)}</span>
+            <button class="btn-link" data-borrar-tag-musica="${escapar(t)}">Borrar</button>
+          </div>`).join("") || `<p class="suave">No hay tags de música.</p>`}
+      </div>
+      <form id="form-nuevo-tag-musica" class="fila-form">
+        <input type="text" name="nombre" placeholder="Nombre del tag" required>
+        <input type="text" name="descripcion" placeholder="Descripción (opcional)">
+        <button class="btn">Crear tag</button>
+      </form>
+    </section>
+
+    <section class="seccion panel">
       <h2>Catálogo <span class="suave" style="font-size:1rem">${cantidadObras(catalogoAdmin)}</span></h2>
       <div class="fila-form">
         <input type="search" id="buscar-catalogo-admin" placeholder="Buscar en el catálogo por título o #tag…"
@@ -2749,6 +2956,22 @@ function eventosAdmin() {
       if (!confirm(`¿Borrar #${b.dataset.borrarTag}? Se quita de todas las películas y series.`)) return;
       await etiquetas.borrar(b.dataset.borrarTag);
       renderMenu();
+      recargar();
+    };
+  });
+
+  document.getElementById("form-nuevo-tag-musica").onsubmit = (e) => {
+    e.preventDefault();
+    const nombre = normalizarTag(e.target.elements.nombre.value);
+    if (!nombre) return;
+    tagsMusica.crear(nombre, e.target.elements.descripcion.value.trim());
+    recargar();
+  };
+
+  document.querySelectorAll("[data-borrar-tag-musica]").forEach((b) => {
+    b.onclick = () => {
+      if (!confirm(`¿Borrar #${b.dataset.borrarTagMusica}? Se quita de todos los discos.`)) return;
+      tagsMusica.borrar(b.dataset.borrarTagMusica);
       recargar();
     };
   });
@@ -3121,6 +3344,8 @@ const rutas = [
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)$/, vista: vistaTemporada, despues: eventosTemporada },
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)\/episodio\/(\d+)$/, vista: vistaEpisodio, despues: eventosEpisodio },
   { patron: /^\/tags$/, vista: vistaTags, despues: eventosCarruseles },
+  { patron: /^\/tags\/musica$/, vista: vistaTagsMusica, despues: eventosCarruseles },
+  { patron: /^\/tags\/musica\/([^/]+)$/, vista: vistaTagMusica, despues: eventosTagMusica },
   { patron: /^\/persona\/(\d+)$/, vista: vistaPersona, despues: eventosCarruseles },
   { patron: /^\/tag\/([^/]+)$/, vista: vistaTag, despues: eventosListado },
   { patron: /^\/catalogo$/, vista: vistaCatalogo, despues: eventosListado },
