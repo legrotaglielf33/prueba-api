@@ -35,7 +35,10 @@ const store = {
   // Trae los datos del servidor. Se llama una vez, antes de mostrar la página.
   async cargar() {
     const resp = await fetch("/api/datos");
-    if (!resp.ok) throw new Error(`El servidor respondió ${resp.status}`);
+    if (!resp.ok) {
+      const { error } = await resp.json().catch(() => ({}));
+      throw new Error(error || `El servidor respondió ${resp.status}`);
+    }
     datosServidor = await resp.json();
 
     // Lo que se había guardado en este navegador antes de usar el servidor se sube una vez
@@ -1147,9 +1150,15 @@ store.cargar()
   })
   .catch((err) => {
     console.error(err);
-    app.innerHTML = `
+    const local = ["localhost", "127.0.0.1", ""].includes(location.hostname);
+    app.innerHTML = local
+      ? `
       <div class="aviso error">
         No se pudo conectar con el servidor. Inicialo con <code>node servidor.js</code>
         y abrí <a href="http://localhost:3000" style="color:var(--acento)">http://localhost:3000</a>.
+      </div>`
+      : `
+      <div class="aviso error">
+        No se pudieron cargar los datos del servidor: ${escapar(err.message)}
       </div>`;
   });
