@@ -1,5 +1,6 @@
 // ===================================================================
-//  El "Santi"-Grial — SPA con la API de TMDB, login, ratings, comentarios y tags
+//  El "Santi"-Grial — SPA con la API de TMDB (películas y series), login,
+//  ratings, comentarios, tags y episodios vistos
 // ===================================================================
 
 const API = "https://api.themoviedb.org/3";
@@ -26,9 +27,18 @@ function formatearFecha(iso) {
   return new Date(iso).toLocaleString("es-AR", { dateStyle: "medium", timeStyle: "short" });
 }
 
+// Para fechas sin hora de TMDB ("2024-05-31")
+function formatearDia(fecha) {
+  return new Date(`${fecha}T00:00`).toLocaleDateString("es-AR", { dateStyle: "medium" });
+}
+
+function yaSalio(fecha) {
+  return Boolean(fecha) && new Date(`${fecha}T00:00`) <= new Date();
+}
+
 // Estas claves se guardan en el servidor (datos/guardados.json) y las ven todos.
 // El resto (sesión, búsquedas en caché, preferencias) queda en este navegador.
-const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo"];
+const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos"];
 let datosServidor = {};
 
 const store = {
@@ -113,10 +123,10 @@ async function tmdb(ruta, params = {}) {
 }
 
 function claveBusqueda(entrada) {
-  return `${entrada.buscar}|${entrada.anio ?? ""}`;
+  return `${entrada.tipo === "serie" ? "serie|" : ""}${entrada.buscar}|${entrada.anio ?? ""}`;
 }
 
-// Convierte una entrada de PELICULAS en un id de TMDB.
+// Convierte una entrada de PELICULAS (película o serie) en un id de TMDB.
 async function resolverId(entrada) {
   if (entrada.id) return entrada.id;
 
@@ -124,9 +134,10 @@ async function resolverId(entrada) {
   const clave = claveBusqueda(entrada);
   if (cache[clave]) return cache[clave];
 
+  const serie = entrada.tipo === "serie";
   const params = { query: entrada.buscar };
-  if (entrada.anio) params.primary_release_year = entrada.anio;
-  const { results } = await tmdb("/search/movie", params);
+  if (entrada.anio) params[serie ? "first_air_date_year" : "primary_release_year"] = entrada.anio;
+  const { results } = await tmdb(serie ? "/search/tv" : "/search/movie", params);
   if (!results.length) return null;
 
   cache[clave] = results[0].id;
@@ -174,9 +185,20 @@ const auth = {
 
 // ---------------------------------------------------------------
 //  Ratings y comentarios
+//  Las películas usan su id de TMDB como clave; las series y los
+//  episodios, las de claveSerie() y claveEpisodio() (los ids de TMDB
+//  de películas y series se pueden repetir).
 // ---------------------------------------------------------------
+function claveSerie(id) {
+  return `serie-${id}`;
+}
+
+function claveEpisodio(id, temporada, episodio) {
+  return `serie-${id}-${temporada}x${episodio}`;
+}
+
 const ratings = {
-  // { [peliId]: { [usuario]: 1..5 } }
+  // { [clave]: { [usuario]: 1..5 } }
   dePelicula(id) {
     return store.leer("ratings", {})[id] ?? {};
   },
@@ -198,7 +220,7 @@ const ratings = {
 };
 
 const comentarios = {
-  // { [peliId]: [{ id, autor, texto, fecha }] }
+  // { [clave]: [{ id, autor, texto, fecha }] }
   dePelicula(id) {
     return store.leer("comentarios", {})[id] ?? [];
   },
@@ -214,6 +236,61 @@ const comentarios = {
     store.guardar("comentarios", todos);
   },
 };
+
+// ---------------------------------------------------------------
+//  Episodios vistos (cada episodio es "temporada x episodio": "1x5")
+// ---------------------------------------------------------------
+function codigoEpisodio(temporada, episodio) {
+  return `${temporada}x${String(episodio).padStart(2, "0")}`;
+}
+
+const vistos = {
+  // { [usuario]: { [serieId]: ["1x1", "1x2", ...] } }
+  deSerie(serieId, usuario) {
+    return new Set(store.leer("vistos", {})[usuario]?.[serieId] ?? []);
+  },
+  marcar(serieId, usuario, episodios, visto) {
+    const todos = store.leer("vistos", {});
+    const lista = new Set(todos[usuario]?.[serieId] ?? []);
+    episodios.forEach((ep) => (visto ? lista.add(ep) : lista.delete(ep)));
+    todos[usuario] = { ...(todos[usuario] ?? {}), [serieId]: [...lista] };
+    if (!lista.size) delete todos[usuario][serieId];
+    store.guardar("vistos", todos);
+  },
+  seriesDe(usuario) {
+    return Object.keys(store.leer("vistos", {})[usuario] ?? {}).map(Number);
+  },
+};
+
+// Primer episodio emitido que el usuario no vio (sin contar los especiales)
+function proximoEpisodio(serie, visto) {
+  const ultimo = serie.last_episode_to_air;
+  if (!ultimo) return null;
+  const temporadas = serie.seasons.filter((s) => s.season_number > 0)
+    .sort((a, b) => a.season_number - b.season_number);
+  for (const s of temporadas) {
+    for (let e = 1; e <= s.episode_count; e++) {
+      const t = s.season_number;
+      if (t > ultimo.season_number || (t === ultimo.season_number && e > ultimo.episode_number)) return null;
+      if (!visto.has(`${t}x${e}`)) return { temporada: t, episodio: e };
+    }
+  }
+  return null;
+}
+
+function cantidadVistos(visto, temporada = null) {
+  return [...visto].filter((ep) => temporada === null
+    ? !ep.startsWith("0x")
+    : ep.startsWith(`${temporada}x`)).length;
+}
+
+function barraProgreso(cantidad, total) {
+  const porcentaje = total ? Math.min(100, Math.round((cantidad / total) * 100)) : 0;
+  return `
+    <div class="progreso" title="${cantidad} de ${total} episodios vistos">
+      <div class="relleno" style="width:${porcentaje}%"></div>
+    </div>`;
+}
 
 // ---------------------------------------------------------------
 //  Catálogo y tags: lo de datos/ + los cambios de los administradores
@@ -242,59 +319,77 @@ const etiquetas = {
     const locales = store.leer("tags_admin", {});
     locales[nombre] = { borrado: true };
     store.guardar("tags_admin", locales);
-    for (const peli of await catalogo.todas()) {
-      if (peli.tags.includes(nombre)) await catalogo.quitarTag(peli.id, nombre);
+    for (const obra of await catalogo.todas()) {
+      if (obra.tags.includes(nombre)) await catalogo.quitarTag(obra.clave, nombre);
     }
   },
 };
 
+// Las películas del catálogo se guardan con su id ("27205") y las series con claveSerie() ("serie-1399")
+function claveCatalogo(tipo, id) {
+  return tipo === "serie" ? claveSerie(id) : String(id);
+}
+
+function desdeClaveCatalogo(clave) {
+  const serie = clave.match(/^serie-(\d+)$/);
+  return serie ? { tipo: "serie", id: Number(serie[1]) } : { tipo: "pelicula", id: Number(clave) };
+}
+
+function rutaObra(tipo, id) {
+  return tipo === "serie" ? `#/serie/${id}` : `#/pelicula/${id}`;
+}
+
 const catalogo = {
-  // Cambios de los admins: { [id]: { titulo, tags, quitada } }
+  // Cambios de los admins: { [clave]: { titulo, tags, quitada } }
   cambios() {
     return store.leer("catalogo", {});
   },
-  guardarCambio(id, cambio) {
+  guardarCambio(clave, cambio) {
     const todos = this.cambios();
-    todos[id] = { ...(todos[id] ?? {}), ...cambio };
+    todos[clave] = { ...(todos[clave] ?? {}), ...cambio };
     store.guardar("catalogo", todos);
   },
+  // [{ clave, tipo, id, titulo, tags }]
   async todas() {
     const ids = await Promise.all(PELICULAS.map((p) => resolverId(p).catch(() => null)));
     const lista = new Map();
     PELICULAS.forEach((p, i) => {
-      if (ids[i]) lista.set(ids[i], { id: ids[i], titulo: p.titulo, tags: p.tags ?? [] });
+      if (!ids[i]) return;
+      const tipo = p.tipo === "serie" ? "serie" : "pelicula";
+      const clave = claveCatalogo(tipo, ids[i]);
+      lista.set(clave, { clave, tipo, id: ids[i], titulo: p.titulo, tags: p.tags ?? [] });
     });
-    for (const [id, cambio] of Object.entries(this.cambios())) {
-      const previa = lista.get(Number(id)) ?? { id: Number(id), tags: [] };
-      lista.set(Number(id), { ...previa, ...cambio });
+    for (const [clave, cambio] of Object.entries(this.cambios())) {
+      const previa = lista.get(clave) ?? { clave, ...desdeClaveCatalogo(clave), tags: [] };
+      lista.set(clave, { ...previa, ...cambio });
     }
-    return [...lista.values()].filter((p) => !p.quitada);
+    return [...lista.values()].filter((o) => !o.quitada);
   },
-  async buscar(id) {
-    return (await this.todas()).find((p) => p.id === id) ?? null;
+  async buscar(clave) {
+    return (await this.todas()).find((o) => o.clave === clave) ?? null;
   },
-  async idsDeTag(tag) {
-    return (await this.todas()).filter((p) => p.tags.includes(tag)).map((p) => p.id);
+  async deTag(tag) {
+    return (await this.todas()).filter((o) => o.tags.includes(tag));
   },
-  agregar(id, titulo, tags = []) {
+  agregar(clave, titulo, tags = []) {
     etiquetas.asegurar(tags);
-    this.guardarCambio(id, { titulo, tags, quitada: false });
+    this.guardarCambio(clave, { titulo, tags, quitada: false });
   },
-  async agregarTag(id, titulo, tag) {
-    const peli = await this.buscar(id);
+  async agregarTag(clave, titulo, tag) {
+    const obra = await this.buscar(clave);
     etiquetas.asegurar([tag]);
-    this.guardarCambio(id, {
-      titulo: peli?.titulo ?? titulo,
-      tags: [...new Set([...(peli?.tags ?? []), tag])],
+    this.guardarCambio(clave, {
+      titulo: obra?.titulo ?? titulo,
+      tags: [...new Set([...(obra?.tags ?? []), tag])],
       quitada: false,
     });
   },
-  async quitarTag(id, tag) {
-    const peli = await this.buscar(id);
-    if (peli) this.guardarCambio(id, { tags: peli.tags.filter((t) => t !== tag) });
+  async quitarTag(clave, tag) {
+    const obra = await this.buscar(clave);
+    if (obra) this.guardarCambio(clave, { tags: obra.tags.filter((t) => t !== tag) });
   },
-  quitar(id) {
-    this.guardarCambio(id, { quitada: true });
+  quitar(clave) {
+    this.guardarCambio(clave, { quitada: true });
   },
 };
 
@@ -307,10 +402,11 @@ function descargar(nombre, contenido) {
 }
 
 async function exportarPeliculas() {
-  const lineas = (await catalogo.todas()).map((p) =>
-    `  { id: ${p.id}, titulo: ${JSON.stringify(p.titulo ?? "")}, tags: ${JSON.stringify(p.tags)} },`);
-  descargar("peliculas.js", `// Películas con tags predefinidos.
-// - id: el id de la película en TMDB (aparece en la URL de themoviedb.org/movie/<id>).
+  const lineas = (await catalogo.todas()).map((o) =>
+    `  { id: ${o.id}, ${o.tipo === "serie" ? `tipo: "serie", ` : ""}titulo: ${JSON.stringify(o.titulo ?? "")}, tags: ${JSON.stringify(o.tags)} },`);
+  descargar("peliculas.js", `// Películas y series del catálogo, con sus tags.
+// - id: el id en TMDB (aparece en la URL de themoviedb.org/movie/<id> o themoviedb.org/tv/<id>).
+// - tipo: "serie" para las series; si no está, es una película.
 // - Si no sabés el id, usá "buscar" (título) y "anio": la app la busca en TMDB y recuerda el resultado.
 // - titulo: sólo de referencia, la app muestra el título que devuelve TMDB.
 const PELICULAS = [
@@ -321,7 +417,7 @@ ${lineas.join("\n")}
 
 function exportarTags() {
   descargar("tags.js", `// Tags predefinidos. La clave es el nombre del tag (lo que va después del #).
-// Para asignarle un tag a una película, agregalo en datos/peliculas.js.
+// Para asignarle un tag a una película o serie, agregalo en datos/peliculas.js.
 const TAGS = ${JSON.stringify(etiquetas.todas(), null, 2)};
 `);
 }
@@ -329,22 +425,129 @@ const TAGS = ${JSON.stringify(etiquetas.todas(), null, 2)};
 // ---------------------------------------------------------------
 //  Componentes de HTML
 // ---------------------------------------------------------------
-function tarjeta(peli) {
-  const poster = peli.poster_path
-    ? `<img class="poster" src="${IMG}w342${peli.poster_path}" alt="${escapar(peli.title)}" loading="lazy">`
-    : `<div class="sin-poster">${escapar(peli.title)}</div>`;
-  const local = ratings.promedio(peli.id);
+// TMDB llama "title" a las películas y "name" a las series
+function esSerie(obra) {
+  return obra.media_type === "tv" || (obra.title === undefined && obra.name !== undefined);
+}
+
+function tituloDe(obra) {
+  return (esSerie(obra) ? obra.name : obra.title) ?? "";
+}
+
+function fechaDe(obra) {
+  return esSerie(obra) ? obra.first_air_date : obra.release_date;
+}
+
+// Tarjeta de una película o una serie (href permite apuntar a otro lado, por ej. a un episodio)
+function tarjeta(obra, href = null) {
+  const serie = esSerie(obra);
+  const titulo = serie ? obra.name : obra.title;
+  const poster = obra.poster_path
+    ? `<img class="poster" src="${IMG}w342${obra.poster_path}" alt="${escapar(titulo)}" loading="lazy">`
+    : `<div class="sin-poster">${escapar(titulo)}</div>`;
+  const local = ratings.promedio(serie ? claveSerie(obra.id) : obra.id);
   return `
-    <a class="tarjeta" href="#/pelicula/${peli.id}">
+    <a class="tarjeta" href="${href ?? (serie ? `#/serie/${obra.id}` : `#/pelicula/${obra.id}`)}">
       ${poster}
       <div class="info">
-        <h3>${escapar(peli.title)}</h3>
+        <h3>${escapar(titulo)}</h3>
         <div class="meta">
-          <span>${anio(peli.release_date)}</span>
-          <span>★ ${peli.vote_average ? peli.vote_average.toFixed(1) : "–"}${local ? ` · ${local.valor.toFixed(1)}/5` : ""}</span>
+          <span>${anio(serie ? obra.first_air_date : obra.release_date)}${serie ? " · Serie" : ""}</span>
+          <span>★ ${obra.vote_average ? obra.vote_average.toFixed(1) : "–"}${local ? ` · ${local.valor.toFixed(1)}/5` : ""}</span>
         </div>
       </div>
     </a>`;
+}
+
+// Puntaje de TMDB, promedio del sitio y las estrellas del usuario
+function bloquePuntajes(clave, votoTmdb, votosTmdb) {
+  const usuario = auth.usuarioActual();
+  const miRating = usuario ? ratings.dePelicula(clave)[usuario] ?? 0 : 0;
+  const promedio = ratings.promedio(clave);
+  return `
+    <div class="puntajes">
+      <div class="puntaje">
+        <div class="valor">${votoTmdb ? votoTmdb.toFixed(1) : "–"}<small>/10</small></div>
+        <div class="etiqueta">TMDB · ${(votosTmdb ?? 0).toLocaleString("es-AR")} votos</div>
+      </div>
+      <div class="puntaje">
+        <div class="valor">${promedio ? promedio.valor.toFixed(1) : "–"}<small>/5</small></div>
+        <div class="etiqueta">El "Santi"-Grial · ${promedio ? promedio.cantidad : 0} votos</div>
+      </div>
+      <div class="puntaje">
+        ${usuario
+          ? `<div id="mi-rating">${estrellas(miRating, true)}</div>
+             <div class="etiqueta">Tu puntuación ${miRating ? `· <button class="btn-link" id="btn-quitar-rating">quitar</button>` : ""}</div>`
+          : `<div class="etiqueta"><a href="#/login" class="btn chico">Ingresá para puntuar</a></div>`}
+      </div>
+    </div>`;
+}
+
+function seccionComentarios(clave, titulo) {
+  const usuario = auth.usuarioActual();
+  const lista = comentarios.dePelicula(clave);
+  return `
+    <section class="seccion">
+      <h2>Comentarios (${lista.length})</h2>
+      ${usuario
+        ? `<form class="form-comentario" id="form-comentario">
+             <textarea name="texto" placeholder="¿Qué te pareció ${escapar(titulo)}?" maxlength="1000" required></textarea>
+             <button class="btn">Publicar</button>
+           </form>`
+        : `<p class="aviso"><a href="#/login" style="color:var(--acento)">Ingresá</a> para dejar un comentario.</p>`}
+      <div class="comentarios">
+        ${lista.map((c) => {
+          const suRating = ratings.dePelicula(clave)[c.autor];
+          return `
+            <div class="comentario">
+              <div class="cabecera">
+                <div>
+                  <span class="autor">${escapar(c.autor)}</span>
+                  ${suRating ? estrellas(suRating, false) : ""}
+                </div>
+                <div>
+                  <span class="fecha">${formatearFecha(c.fecha)}</span>
+                  ${c.autor === usuario ? `<button class="btn-link" data-borrar="${c.id}">Borrar</button>` : ""}
+                </div>
+              </div>
+              <p>${escapar(c.texto)}</p>
+            </div>`;
+        }).join("") || `<p class="suave">Todavía no hay comentarios. ¡Sé el primero!</p>`}
+      </div>
+    </section>`;
+}
+
+// personas: [{ name, profile_path, character }]
+function seccionReparto(personas, titulo = "Reparto") {
+  return `
+    <section class="seccion" style="margin-top:32px">
+      <h2>${titulo}</h2>
+      <div class="reparto">
+        ${personas.slice(0, 12).map((a) => `
+          <div class="actor">
+            ${a.profile_path
+              ? `<img src="${IMG}w185${a.profile_path}" alt="${escapar(a.name)}" loading="lazy">`
+              : `<div class="sin-poster">Sin foto</div>`}
+            ${escapar(a.name)}
+            <span>${escapar(a.character)}</span>
+          </div>`).join("") || `<p class="suave">Sin datos de reparto.</p>`}
+      </div>
+    </section>`;
+}
+
+// Si no hay trailer en español, se busca en inglés
+async function buscarTrailer(videos, rutaVideos) {
+  const esTrailer = (v) => v.site === "YouTube" && v.type === "Trailer";
+  if (!videos.some(esTrailer)) videos = (await tmdb(rutaVideos, { language: "en-US" })).results;
+  return videos.find(esTrailer);
+}
+
+function seccionTrailer(trailer) {
+  return trailer ? `
+    <section class="seccion" style="margin-top:32px">
+      <h2>Tráiler</h2>
+      <iframe class="trailer" src="https://www.youtube.com/embed/${trailer.key}" title="Tráiler" allowfullscreen></iframe>
+    </section>` : "";
 }
 
 function estrellas(valor, editable) {
@@ -355,9 +558,15 @@ function estrellas(valor, editable) {
   return html + "</div>";
 }
 
-// Listado con orden y filtro por género (para el catálogo y las páginas de tags).
-// Necesita películas con detalle completo (que traigan "genres").
+// Listado con orden y filtros por tipo y género (para el catálogo y las páginas de tags).
+// Necesita películas y series con detalle completo (que traigan "genres").
 let pelisListado = [];
+
+const TIPOS_LISTADO = {
+  "": "Todo",
+  pelicula: "Películas",
+  serie: "Series",
+};
 
 const ORDENES = {
   genero: "Género",
@@ -367,7 +576,7 @@ const ORDENES = {
 };
 
 function preferenciasListado() {
-  return store.leer("listado", { orden: "genero", genero: "" });
+  return { orden: "genero", genero: "", tipo: "", ...store.leer("listado", {}) };
 }
 
 function listado(pelis) {
@@ -379,9 +588,18 @@ function listado(pelis) {
     pref.genero = "";
     store.guardar("listado", pref);
   }
+  // El filtro de tipo sólo tiene sentido si hay películas y series mezcladas
+  const mezclado = pelis.some(esSerie) && !pelis.every(esSerie);
 
   return `
     <div class="controles">
+      ${mezclado ? `
+        <label>Mostrar
+          <select id="filtro-tipo">
+            ${Object.entries(TIPOS_LISTADO).map(([valor, texto]) =>
+              `<option value="${valor}" ${pref.tipo === valor ? "selected" : ""}>${texto}</option>`).join("")}
+          </select>
+        </label>` : ""}
       <label>Ordenar por
         <select id="orden">
           ${Object.entries(ORDENES).map(([valor, texto]) =>
@@ -400,11 +618,13 @@ function listado(pelis) {
 }
 
 function dibujarListado() {
-  const { orden, genero } = preferenciasListado();
-  const pelis = pelisListado.filter((p) => !genero || p.genres.some((g) => g.name === genero));
-  if (!pelis.length) return `<p class="suave">No hay películas para mostrar.</p>`;
+  const { orden, genero, tipo } = preferenciasListado();
+  const pelis = pelisListado.filter((p) =>
+    (!genero || p.genres.some((g) => g.name === genero)) &&
+    (!tipo || esSerie(p) === (tipo === "serie")));
+  if (!pelis.length) return `<p class="suave">No hay nada para mostrar.</p>`;
 
-  const porAnio = (a, b) => (a.release_date || "").localeCompare(b.release_date || "");
+  const porAnio = (a, b) => (fechaDe(a) || "").localeCompare(fechaDe(b) || "");
 
   if (orden === "genero") {
     // Cada película va en su género principal (el primero que da TMDB)
@@ -415,31 +635,35 @@ function dibujarListado() {
     }
     return Object.keys(grupos).sort((a, b) => a.localeCompare(b)).map((g) => `
       <h3 class="titulo-genero">${escapar(g)} <span class="suave">(${grupos[g].length})</span></h3>
-      <div class="grilla">${grupos[g].map(tarjeta).join("")}</div>`).join("");
+      <div class="grilla">${grupos[g].map((o) => tarjeta(o)).join("")}</div>`).join("");
   }
 
   const comparar = {
-    titulo: (a, b) => a.title.localeCompare(b.title),
+    titulo: (a, b) => tituloDe(a).localeCompare(tituloDe(b)),
     anio: porAnio,
     puntaje: (a, b) => b.vote_average - a.vote_average,
   }[orden] ?? porAnio;
-  return `<div class="grilla">${[...pelis].sort(comparar).map(tarjeta).join("")}</div>`;
+  return `<div class="grilla">${[...pelis].sort(comparar).map((o) => tarjeta(o)).join("")}</div>`;
 }
 
 function eventosListado() {
   const orden = document.getElementById("orden");
   const genero = document.getElementById("filtro-genero");
+  const tipo = document.getElementById("filtro-tipo");
   if (!orden) return;
   const actualizar = () => {
-    store.guardar("listado", { orden: orden.value, genero: genero.value });
+    store.guardar("listado", { orden: orden.value, genero: genero.value, tipo: tipo?.value ?? "" });
     document.getElementById("resultado-listado").innerHTML = dibujarListado();
   };
   orden.onchange = actualizar;
   genero.onchange = actualizar;
+  if (tipo) tipo.onchange = actualizar;
 }
 
-async function detallesDe(ids) {
-  return (await Promise.all(ids.map((id) => tmdb(`/movie/${id}`).catch(() => null)))).filter(Boolean);
+// obras: [{ tipo, id }] (como las de catalogo.todas())
+async function detallesDe(obras) {
+  return (await Promise.all(obras.map((o) =>
+    tmdb(o.tipo === "serie" ? `/tv/${o.id}` : `/movie/${o.id}`).catch(() => null)))).filter(Boolean);
 }
 
 function avisoSinCredenciales() {
@@ -460,6 +684,7 @@ function renderMenu() {
   document.getElementById("menu").innerHTML = `
     <a href="#/">Inicio</a>
     <a href="#/catalogo">Catálogo</a>
+    <a href="#/series">Series</a>
     ${Object.keys(etiquetas.todas()).map((t) =>
       `<a href="#/tag/${encodeURIComponent(t)}">#${escapar(t)}</a>`).join("")}
     ${auth.esAdmin() ? `<a href="#/admin">⚙ Admin</a>` : ""}`;
@@ -489,12 +714,13 @@ function renderZonaUsuario() {
 async function vistaInicio() {
   if (!hayCredenciales()) return avisoSinCredenciales();
 
-  const [tendencias, mejores, secciones] = await Promise.all([
+  const [tendencias, mejores, series, secciones] = await Promise.all([
     tmdb("/trending/movie/week"),
     tmdb("/movie/top_rated"),
+    tmdb("/trending/tv/week"),
     Promise.all(Object.keys(etiquetas.todas()).map(async (tag) => {
-      const ids = await catalogo.idsDeTag(tag);
-      return { tag, total: ids.length, pelis: await detallesDe(ids.slice(0, 6)) };
+      const obras = await catalogo.deTag(tag);
+      return { tag, total: obras.length, pelis: await detallesDe(obras.slice(0, 6)) };
     })),
   ]);
   const destacada = tendencias.results.find((p) => p.backdrop_path) ?? tendencias.results[0];
@@ -513,17 +739,22 @@ async function vistaInicio() {
     ${secciones.filter((s) => s.total).map((s) => `
       <section class="seccion">
         <h2>#${escapar(s.tag)} <a href="#/tag/${encodeURIComponent(s.tag)}">Ver todas (${s.total}) →</a></h2>
-        <div class="grilla">${s.pelis.map(tarjeta).join("")}</div>
+        <div class="grilla">${s.pelis.map((o) => tarjeta(o)).join("")}</div>
       </section>`).join("")}
 
     <section class="seccion">
       <h2>Tendencias de la semana</h2>
-      <div class="grilla">${tendencias.results.slice(0, 12).map(tarjeta).join("")}</div>
+      <div class="grilla">${tendencias.results.slice(0, 12).map((p) => tarjeta(p)).join("")}</div>
+    </section>
+
+    <section class="seccion">
+      <h2>Series en tendencia <a href="#/series">Ver series →</a></h2>
+      <div class="grilla">${series.results.slice(0, 12).map((s) => tarjeta(s)).join("")}</div>
     </section>
 
     <section class="seccion">
       <h2>Mejor puntuadas</h2>
-      <div class="grilla">${mejores.results.slice(0, 12).map(tarjeta).join("")}</div>
+      <div class="grilla">${mejores.results.slice(0, 12).map((o) => tarjeta(o)).join("")}</div>
     </section>`;
 }
 
@@ -532,22 +763,11 @@ async function vistaPelicula(id) {
   id = Number(id);
 
   const peli = await tmdb(`/movie/${id}`, { append_to_response: "credits,videos" });
-  // Si no hay trailer en español, se busca en inglés
-  let videos = peli.videos.results;
-  if (!videos.some((v) => v.site === "YouTube" && v.type === "Trailer")) {
-    videos = (await tmdb(`/movie/${id}/videos`, { language: "en-US" })).results;
-  }
-  const trailer = videos.find((v) => v.site === "YouTube" && v.type === "Trailer");
+  const trailer = await buscarTrailer(peli.videos.results, `/movie/${id}/videos`);
 
-  const usuario = auth.usuarioActual();
-  const miRating = usuario ? ratings.dePelicula(id)[usuario] ?? 0 : 0;
-  const promedio = ratings.promedio(id);
   const director = peli.credits.crew.find((c) => c.job === "Director");
-  const enCatalogo = await catalogo.buscar(id);
-  const tagsPeli = enCatalogo?.tags ?? [];
-  const admin = auth.esAdmin();
-  const lista = comentarios.dePelicula(id);
-  peliActual = { id, titulo: peli.title };
+  const enCatalogo = await catalogo.buscar(claveCatalogo("pelicula", id));
+  obraActual = { clave: claveCatalogo("pelicula", id), titulo: peli.title, tipo: "pelicula" };
 
   document.title = `${peli.title} · El "Santi"-Grial`;
 
@@ -569,158 +789,114 @@ async function vistaPelicula(id) {
           <div class="tags">
             ${peli.genres.map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}
           </div>
-          <div class="tags">
-            ${tagsPeli.map((t) => `
-              <span class="tag especial">
-                <a href="#/tag/${encodeURIComponent(t)}">#${escapar(t)}</a>
-                ${admin ? `<button class="quitar-tag" data-quitar-tag="${escapar(t)}" title="Quitar tag">✕</button>` : ""}
-              </span>`).join("")}
-          </div>
-          ${admin ? `
-            <form class="fila-form" id="form-tag">
-              <input type="text" name="tag" list="lista-tags" placeholder="Agregar tag…" required>
-              ${datalistTags()}
-              <button class="btn chico">+ Tag</button>
-              ${enCatalogo
-                ? `<button type="button" class="btn secundario chico" id="btn-quitar-catalogo">Quitar del catálogo</button>`
-                : `<button type="button" class="btn secundario chico" id="btn-agregar-catalogo">Agregar al catálogo</button>`}
-            </form>` : ""}
+          ${bloqueTagsCatalogo(enCatalogo)}
 
           <p>${escapar(peli.overview || "Sin sinopsis disponible.")}</p>
 
-          <div class="puntajes">
-            <div class="puntaje">
-              <div class="valor">${peli.vote_average.toFixed(1)}<small>/10</small></div>
-              <div class="etiqueta">TMDB · ${peli.vote_count.toLocaleString("es-AR")} votos</div>
-            </div>
-            <div class="puntaje">
-              <div class="valor">${promedio ? promedio.valor.toFixed(1) : "–"}<small>/5</small></div>
-              <div class="etiqueta">El "Santi"-Grial · ${promedio ? promedio.cantidad : 0} votos</div>
-            </div>
-            <div class="puntaje">
-              ${usuario
-                ? `<div id="mi-rating">${estrellas(miRating, true)}</div>
-                   <div class="etiqueta">Tu puntuación ${miRating ? `· <button class="btn-link" id="btn-quitar-rating">quitar</button>` : ""}</div>`
-                : `<div class="etiqueta"><a href="#/login" class="btn chico">Ingresá para puntuar</a></div>`}
-            </div>
-          </div>
+          ${bloquePuntajes(id, peli.vote_average, peli.vote_count)}
         </div>
       </div>
     </div>
 
-    ${trailer ? `
-      <section class="seccion" style="margin-top:32px">
-        <h2>Tráiler</h2>
-        <iframe class="trailer" src="https://www.youtube.com/embed/${trailer.key}" title="Tráiler" allowfullscreen></iframe>
-      </section>` : ""}
-
-    <section class="seccion" style="margin-top:32px">
-      <h2>Reparto</h2>
-      <div class="reparto">
-        ${peli.credits.cast.slice(0, 12).map((a) => `
-          <div class="actor">
-            ${a.profile_path
-              ? `<img src="${IMG}w185${a.profile_path}" alt="${escapar(a.name)}" loading="lazy">`
-              : `<div class="sin-poster">Sin foto</div>`}
-            ${escapar(a.name)}
-            <span>${escapar(a.character)}</span>
-          </div>`).join("") || `<p class="suave">Sin datos de reparto.</p>`}
-      </div>
-    </section>
-
-    <section class="seccion">
-      <h2>Comentarios (${lista.length})</h2>
-      ${usuario
-        ? `<form class="form-comentario" id="form-comentario">
-             <textarea name="texto" placeholder="¿Qué te pareció ${escapar(peli.title)}?" maxlength="1000" required></textarea>
-             <button class="btn">Publicar</button>
-           </form>`
-        : `<p class="aviso"><a href="#/login" style="color:var(--acento)">Ingresá</a> para dejar un comentario.</p>`}
-      <div class="comentarios">
-        ${lista.map((c) => {
-          const suRating = ratings.dePelicula(id)[c.autor];
-          return `
-            <div class="comentario">
-              <div class="cabecera">
-                <div>
-                  <span class="autor">${escapar(c.autor)}</span>
-                  ${suRating ? estrellas(suRating, false) : ""}
-                </div>
-                <div>
-                  <span class="fecha">${formatearFecha(c.fecha)}</span>
-                  ${c.autor === usuario ? `<button class="btn-link" data-borrar="${c.id}">Borrar</button>` : ""}
-                </div>
-              </div>
-              <p>${escapar(c.texto)}</p>
-            </div>`;
-        }).join("") || `<p class="suave">Todavía no hay comentarios. ¡Sé el primero!</p>`}
-      </div>
-    </section>`;
+    ${seccionTrailer(trailer)}
+    ${seccionReparto(peli.credits.cast)}
+    ${seccionComentarios(id, peli.title)}`;
 }
 
-let peliActual = null;
+// La película o serie que se está viendo: { clave (del catálogo), titulo, tipo }
+let obraActual = null;
 
-// Eventos de la página de película (se enganchan después de renderizar)
-function eventosPelicula(id) {
-  id = Number(id);
-  const usuario = auth.usuarioActual();
-  if (!usuario) return;
+// Tags del catálogo de una película o serie y, para los admins, el formulario para editarlos
+function bloqueTagsCatalogo(enCatalogo) {
+  const admin = auth.esAdmin();
+  return `
+    <div class="tags">
+      ${(enCatalogo?.tags ?? []).map((t) => `
+        <span class="tag especial">
+          <a href="#/tag/${encodeURIComponent(t)}">#${escapar(t)}</a>
+          ${admin ? `<button class="quitar-tag" data-quitar-tag="${escapar(t)}" title="Quitar tag">✕</button>` : ""}
+        </span>`).join("")}
+    </div>
+    ${admin ? `
+      <form class="fila-form" id="form-tag">
+        <input type="text" name="tag" list="lista-tags" placeholder="Agregar tag…" required>
+        ${datalistTags()}
+        <button class="btn chico">+ Tag</button>
+        ${enCatalogo
+          ? `<button type="button" class="btn secundario chico" id="btn-quitar-catalogo">Quitar del catálogo</button>`
+          : `<button type="button" class="btn secundario chico" id="btn-agregar-catalogo">Agregar al catálogo</button>`}
+      </form>` : ""}`;
+}
 
-  document.querySelectorAll("#mi-rating button").forEach((b) => {
-    b.onclick = () => {
-      ratings.poner(id, usuario, Number(b.dataset.valor));
-      recargar();
-    };
-  });
-
-  const quitarRating = document.getElementById("btn-quitar-rating");
-  if (quitarRating) quitarRating.onclick = () => { ratings.quitar(id, usuario); recargar(); };
-
-  document.getElementById("form-comentario").onsubmit = (e) => {
-    e.preventDefault();
-    const texto = e.target.texto.value.trim();
-    if (!texto) return;
-    comentarios.agregar(id, usuario, texto);
-    recargar();
-  };
-
-  document.querySelectorAll("[data-borrar]").forEach((b) => {
-    b.onclick = () => {
-      if (confirm("¿Borrar este comentario?")) {
-        comentarios.borrar(id, b.dataset.borrar);
-        recargar();
-      }
-    };
-  });
-
+function eventosTagsCatalogo() {
   if (!auth.esAdmin()) return;
+  const { clave, titulo, tipo } = obraActual;
 
   document.getElementById("form-tag").onsubmit = async (e) => {
     e.preventDefault();
     const tag = normalizarTag(e.target.elements.tag.value);
     if (!tag) return;
-    await catalogo.agregarTag(id, peliActual.titulo, tag);
+    await catalogo.agregarTag(clave, titulo, tag);
     renderMenu();
     recargar();
   };
 
   document.querySelectorAll("[data-quitar-tag]").forEach((b) => {
     b.onclick = async () => {
-      await catalogo.quitarTag(id, b.dataset.quitarTag);
+      await catalogo.quitarTag(clave, b.dataset.quitarTag);
       recargar();
     };
   });
 
   const agregar = document.getElementById("btn-agregar-catalogo");
-  if (agregar) agregar.onclick = () => { catalogo.agregar(id, peliActual.titulo); recargar(); };
+  if (agregar) agregar.onclick = () => { catalogo.agregar(clave, titulo); recargar(); };
 
   const quitar = document.getElementById("btn-quitar-catalogo");
   if (quitar) quitar.onclick = () => {
-    if (confirm("¿Quitar esta película del catálogo? Se le borran también los tags.")) {
-      catalogo.quitar(id);
+    if (confirm(`¿Quitar esta ${tipo === "serie" ? "serie" : "película"} del catálogo? Se le borran también los tags.`)) {
+      catalogo.quitar(clave);
       recargar();
     }
   };
+}
+
+// Estrellas y comentarios de una película, serie o episodio (después de renderizar)
+function eventosOpiniones(clave) {
+  const usuario = auth.usuarioActual();
+  if (!usuario) return;
+
+  document.querySelectorAll("#mi-rating button").forEach((b) => {
+    b.onclick = () => {
+      ratings.poner(clave, usuario, Number(b.dataset.valor));
+      recargar();
+    };
+  });
+
+  const quitarRating = document.getElementById("btn-quitar-rating");
+  if (quitarRating) quitarRating.onclick = () => { ratings.quitar(clave, usuario); recargar(); };
+
+  document.getElementById("form-comentario").onsubmit = (e) => {
+    e.preventDefault();
+    const texto = e.target.texto.value.trim();
+    if (!texto) return;
+    comentarios.agregar(clave, usuario, texto);
+    recargar();
+  };
+
+  document.querySelectorAll("[data-borrar]").forEach((b) => {
+    b.onclick = () => {
+      if (confirm("¿Borrar este comentario?")) {
+        comentarios.borrar(clave, b.dataset.borrar);
+        recargar();
+      }
+    };
+  });
+}
+
+// Eventos de la página de película (se enganchan después de renderizar)
+function eventosPelicula(id) {
+  eventosOpiniones(Number(id));
+  eventosTagsCatalogo();
 }
 
 function datalistTags() {
@@ -733,32 +909,503 @@ async function vistaTag(tag) {
   if (!hayCredenciales()) return avisoSinCredenciales();
   tag = normalizarTag(decodeURIComponent(tag));
 
-  const pelis = await detallesDe(await catalogo.idsDeTag(tag));
+  const pelis = await detallesDe(await catalogo.deTag(tag));
   const descripcion = etiquetas.todas()[tag]?.descripcion;
   document.title = `#${tag} · El "Santi"-Grial`;
 
   return `
     <section class="seccion">
-      <h2>#${escapar(tag)} <span class="suave" style="font-size:1rem">${pelis.length} películas</span></h2>
+      <h2>#${escapar(tag)} <span class="suave" style="font-size:1rem">${cantidadObras(pelis)}</span></h2>
       ${descripcion ? `<p class="suave">${escapar(descripcion)}</p>` : ""}
-      ${pelis.length ? listado(pelis) : `<p class="suave">No hay películas con este tag.</p>`}
+      ${pelis.length ? listado(pelis) : `<p class="suave">No hay películas ni series con este tag.</p>`}
     </section>`;
+}
+
+// "12 películas · 3 series" (sirve con datos de TMDB o con entradas del catálogo, que traen "tipo")
+function cantidadObras(obras) {
+  const series = obras.filter((o) => (o.tipo ? o.tipo === "serie" : esSerie(o))).length;
+  const pelis = obras.length - series;
+  const partes = [];
+  if (pelis || !series) partes.push(`${pelis} ${pelis === 1 ? "película" : "películas"}`);
+  if (series) partes.push(`${series} ${series === 1 ? "serie" : "series"}`);
+  return partes.join(" · ");
 }
 
 async function vistaCatalogo() {
   if (!hayCredenciales()) return avisoSinCredenciales();
-  const pelis = await detallesDe((await catalogo.todas()).map((p) => p.id));
+  const pelis = await detallesDe(await catalogo.todas());
   document.title = `Catálogo · El "Santi"-Grial`;
 
   return `
     <section class="seccion">
-      <h2>Catálogo <span class="suave" style="font-size:1rem">${pelis.length} películas</span></h2>
+      <h2>Catálogo <span class="suave" style="font-size:1rem">${cantidadObras(pelis)}</span></h2>
       ${pelis.length ? listado(pelis) : `<p class="suave">El catálogo está vacío.</p>`}
     </section>`;
 }
 
+// ---------- Series ----------
+const ESTADOS_SERIE = {
+  "Returning Series": "En emisión",
+  Ended: "Finalizada",
+  Canceled: "Cancelada",
+  "In Production": "En producción",
+  Planned: "Planeada",
+  Pilot: "Piloto",
+};
+
+function rutaTemporada(id, temporada) {
+  return `#/serie/${id}/temporada/${temporada}`;
+}
+
+function rutaEpisodio(id, temporada, episodio) {
+  return `${rutaTemporada(id, temporada)}/episodio/${episodio}`;
+}
+
+function aniosSerie(serie) {
+  const desde = anio(serie.first_air_date);
+  if (["Ended", "Canceled"].includes(serie.status)) {
+    const hasta = anio(serie.last_air_date);
+    return hasta === desde ? desde : `${desde}–${hasta}`;
+  }
+  return `${desde}–`;
+}
+
+// Las temporadas en orden, con los especiales (temporada 0) al final
+function temporadasDe(serie) {
+  return [...serie.seasons].sort((a, b) =>
+    (a.season_number || Infinity) - (b.season_number || Infinity));
+}
+
+async function vistaSeries() {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  const usuario = auth.usuarioActual();
+
+  const [tendencias, populares, mejores, siguiendo] = await Promise.all([
+    tmdb("/trending/tv/week"),
+    tmdb("/tv/popular"),
+    tmdb("/tv/top_rated"),
+    Promise.all((usuario ? vistos.seriesDe(usuario) : []).map((id) => tmdb(`/tv/${id}`).catch(() => null))),
+  ]);
+  const destacada = tendencias.results.find((s) => s.backdrop_path) ?? tendencias.results[0];
+  document.title = `Series · El "Santi"-Grial`;
+
+  const seccion = (titulo, series) => `
+    <section class="seccion">
+      <h2>${titulo}</h2>
+      <div class="grilla">${series.slice(0, 12).map((s) => tarjeta(s)).join("")}</div>
+    </section>`;
+
+  return `
+    <section class="hero" style="background-image:url('${IMG}original${destacada.backdrop_path}')">
+      <div class="contenido">
+        <p class="suave">Serie en tendencia de la semana</p>
+        <h1>${escapar(destacada.name)}</h1>
+        <p>${escapar(destacada.overview.slice(0, 220))}${destacada.overview.length > 220 ? "…" : ""}</p>
+        <a class="btn" href="#/serie/${destacada.id}">Ver serie</a>
+      </div>
+    </section>
+
+    ${siguiendo.some(Boolean) ? `
+      <section class="seccion">
+        <h2>Seguís viendo</h2>
+        <div class="grilla">
+          ${siguiendo.filter(Boolean).map((s) => {
+            const visto = vistos.deSerie(s.id, usuario);
+            return `
+              <div>
+                ${tarjeta(s)}
+                ${barraProgreso(cantidadVistos(visto), s.number_of_episodes)}
+                <div class="suave nota">${cantidadVistos(visto)} de ${s.number_of_episodes} episodios</div>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : ""}
+
+    ${seccion("Tendencias de la semana", tendencias.results)}
+    ${seccion("Populares", populares.results)}
+    ${seccion("Mejor puntuadas", mejores.results)}`;
+}
+
+async function vistaSerie(id) {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  id = Number(id);
+
+  const serie = await tmdb(`/tv/${id}`, { append_to_response: "aggregate_credits,videos" });
+  const trailer = await buscarTrailer(serie.videos.results, `/tv/${id}/videos`);
+  const enCatalogo = await catalogo.buscar(claveCatalogo("serie", id));
+  obraActual = { clave: claveCatalogo("serie", id), titulo: serie.name, tipo: "serie" };
+  const usuario = auth.usuarioActual();
+  const visto = usuario ? vistos.deSerie(id, usuario) : new Set();
+  const siguiente = usuario ? proximoEpisodio(serie, visto) : null;
+  const proximo = serie.next_episode_to_air;
+  const reparto = serie.aggregate_credits.cast.map((a) => ({
+    ...a,
+    character: [a.roles?.[0]?.character, a.total_episode_count && `${a.total_episode_count} episodios`]
+      .filter(Boolean).join(" · "),
+  }));
+
+  document.title = `${serie.name} · El "Santi"-Grial`;
+
+  return `
+    <div class="fondo-peli" style="${serie.backdrop_path ? `background-image:url('${IMG}w1280${serie.backdrop_path}')` : ""}">
+      <div class="detalle">
+        ${serie.poster_path
+          ? `<img class="poster" src="${IMG}w500${serie.poster_path}" alt="${escapar(serie.name)}">`
+          : `<div class="sin-poster">Sin póster</div>`}
+        <div>
+          <h1>${escapar(serie.name)} <span class="suave">(${aniosSerie(serie)})</span></h1>
+          ${serie.tagline ? `<p class="eslogan">${escapar(serie.tagline)}</p>` : ""}
+          <div class="datos">
+            <span>📺 ${escapar(ESTADOS_SERIE[serie.status] ?? serie.status)}</span>
+            <span>${serie.number_of_seasons} temporadas · ${serie.number_of_episodes} episodios</span>
+            ${serie.episode_run_time?.[0] ? `<span>⏱ ${serie.episode_run_time[0]} min</span>` : ""}
+            ${serie.created_by.length ? `<span>🎬 ${serie.created_by.map((c) => escapar(c.name)).join(", ")}</span>` : ""}
+            ${serie.networks.length ? `<span>${serie.networks.map((n) => escapar(n.name)).join(", ")}</span>` : ""}
+            ${serie.original_name !== serie.name ? `<span>Título original: ${escapar(serie.original_name)}</span>` : ""}
+          </div>
+
+          <div class="tags">
+            ${serie.genres.map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}
+          </div>
+          ${bloqueTagsCatalogo(enCatalogo)}
+
+          <p>${escapar(serie.overview || "Sin sinopsis disponible.")}</p>
+
+          ${usuario ? `
+            <div class="seguimiento">
+              ${barraProgreso(cantidadVistos(visto), serie.number_of_episodes)}
+              <span class="suave">Viste ${cantidadVistos(visto)} de ${serie.number_of_episodes} episodios</span>
+              ${siguiente ? `
+                <a class="btn chico" href="${rutaEpisodio(id, siguiente.temporada, siguiente.episodio)}">
+                  ▶ Seguir con ${codigoEpisodio(siguiente.temporada, siguiente.episodio)}
+                </a>` : ""}
+            </div>` : ""}
+          ${proximo ? `
+            <p class="suave">
+              Próximo episodio: <a href="${rutaEpisodio(id, proximo.season_number, proximo.episode_number)}" style="color:var(--acento)">
+              ${codigoEpisodio(proximo.season_number, proximo.episode_number)} ${escapar(proximo.name)}</a>
+              ${proximo.air_date ? `· ${formatearDia(proximo.air_date)}` : ""}
+            </p>` : ""}
+
+          ${bloquePuntajes(claveSerie(id), serie.vote_average, serie.vote_count)}
+        </div>
+      </div>
+    </div>
+
+    <section class="seccion" style="margin-top:32px">
+      <h2>Temporadas</h2>
+      <div class="grilla">
+        ${temporadasDe(serie).map((t) => `
+          <a class="tarjeta" href="${rutaTemporada(id, t.season_number)}">
+            ${t.poster_path
+              ? `<img class="poster" src="${IMG}w342${t.poster_path}" alt="${escapar(t.name)}" loading="lazy">`
+              : `<div class="sin-poster">${escapar(t.name)}</div>`}
+            <div class="info">
+              <h3>${escapar(t.name)}</h3>
+              <div class="meta">
+                <span>${anio(t.air_date)}</span>
+                <span>${t.episode_count} ep.</span>
+              </div>
+              ${usuario && t.episode_count ? barraProgreso(cantidadVistos(visto, t.season_number), t.episode_count) : ""}
+            </div>
+          </a>`).join("")}
+      </div>
+    </section>
+
+    ${seccionTrailer(trailer)}
+    ${seccionReparto(reparto)}
+    ${seccionComentarios(claveSerie(id), serie.name)}`;
+}
+
+function eventosSerie(id) {
+  eventosOpiniones(claveSerie(id));
+  eventosTagsCatalogo();
+}
+
+let temporadaActual = null;
+
+async function vistaTemporada(id, numero) {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  id = Number(id);
+  numero = Number(numero);
+
+  const [serie, temporada] = await Promise.all([tmdb(`/tv/${id}`), tmdb(`/tv/${id}/season/${numero}`)]);
+  const usuario = auth.usuarioActual();
+  const visto = usuario ? vistos.deSerie(id, usuario) : new Set();
+  const emitidos = temporada.episodes.filter((e) => yaSalio(e.air_date)).map((e) => `${numero}x${e.episode_number}`);
+  const todosVistos = emitidos.length > 0 && emitidos.every((ep) => visto.has(ep));
+  temporadaActual = { emitidos, todosVistos };
+
+  document.title = `${serie.name} · ${temporada.name} · El "Santi"-Grial`;
+
+  return `
+    <div class="fondo-peli" style="${serie.backdrop_path ? `background-image:url('${IMG}w1280${serie.backdrop_path}')` : ""}">
+      <div class="detalle">
+        ${temporada.poster_path || serie.poster_path
+          ? `<img class="poster" src="${IMG}w500${temporada.poster_path || serie.poster_path}" alt="${escapar(temporada.name)}">`
+          : `<div class="sin-poster">Sin póster</div>`}
+        <div>
+          <p class="miga"><a href="#/serie/${id}">${escapar(serie.name)}</a></p>
+          <h1>${escapar(temporada.name)} <span class="suave">(${anio(temporada.air_date)})</span></h1>
+          <div class="datos">
+            <span>${temporada.episodes.length} episodios</span>
+            ${usuario ? `<span>Viste ${cantidadVistos(visto, numero)} de ${temporada.episodes.length}</span>` : ""}
+          </div>
+          <div class="tags">
+            ${temporadasDe(serie).map((t) => `
+              <a class="tag ${t.season_number === numero ? "especial" : ""}" href="${rutaTemporada(id, t.season_number)}">
+                ${t.season_number ? `T${t.season_number}` : "Especiales"}
+              </a>`).join("")}
+          </div>
+          <p>${escapar(temporada.overview || serie.overview || "Sin sinopsis disponible.")}</p>
+          ${usuario && emitidos.length ? `
+            <div class="seguimiento">
+              ${barraProgreso(cantidadVistos(visto, numero), temporada.episodes.length)}
+              <button class="btn chico ${todosVistos ? "secundario" : ""}" id="btn-temporada-vista">
+                ${todosVistos ? "Desmarcar temporada" : "✓ Marcar temporada como vista"}
+              </button>
+            </div>` : ""}
+        </div>
+      </div>
+    </div>
+
+    <section class="seccion" style="margin-top:32px">
+      <h2>Episodios</h2>
+      <div class="episodios">
+        ${temporada.episodes.map((e) => {
+          const clave = claveEpisodio(id, numero, e.episode_number);
+          const local = ratings.promedio(clave);
+          const cantComentarios = comentarios.dePelicula(clave).length;
+          const fueVisto = visto.has(`${numero}x${e.episode_number}`);
+          const ruta = rutaEpisodio(id, numero, e.episode_number);
+          return `
+            <div class="episodio ${fueVisto ? "visto" : ""}">
+              <a href="${ruta}">
+                ${e.still_path
+                  ? `<img class="still" src="${IMG}w300${e.still_path}" alt="" loading="lazy">`
+                  : `<div class="still sin-imagen">Sin imagen</div>`}
+              </a>
+              <div class="cuerpo">
+                <a href="${ruta}"><h3>${codigoEpisodio(numero, e.episode_number)} · ${escapar(e.name)}</h3></a>
+                <div class="meta">
+                  ${e.air_date
+                    ? `<span>${yaSalio(e.air_date) ? "" : "Se estrena el "}${formatearDia(e.air_date)}</span>`
+                    : `<span>Sin fecha</span>`}
+                  ${e.runtime ? `<span>⏱ ${e.runtime} min</span>` : ""}
+                  ${e.vote_average ? `<span>★ ${e.vote_average.toFixed(1)}</span>` : ""}
+                  ${local ? `<span>${local.valor.toFixed(1)}/5</span>` : ""}
+                  ${cantComentarios ? `<span>💬 ${cantComentarios}</span>` : ""}
+                </div>
+                <p>${escapar(e.overview.slice(0, 260))}${e.overview.length > 260 ? "…" : ""}</p>
+              </div>
+              ${usuario && yaSalio(e.air_date) ? `
+                <label class="check-visto">
+                  <input type="checkbox" data-visto="${numero}x${e.episode_number}" ${fueVisto ? "checked" : ""}>
+                  Visto
+                </label>` : ""}
+            </div>`;
+        }).join("") || `<p class="suave">Esta temporada todavía no tiene episodios.</p>`}
+      </div>
+    </section>`;
+}
+
+function eventosTemporada(id) {
+  id = Number(id);
+  const usuario = auth.usuarioActual();
+  if (!usuario) return;
+
+  document.querySelectorAll("[data-visto]").forEach((c) => {
+    c.onchange = () => {
+      vistos.marcar(id, usuario, [c.dataset.visto], c.checked);
+      recargar();
+    };
+  });
+
+  const boton = document.getElementById("btn-temporada-vista");
+  if (boton) boton.onclick = () => {
+    vistos.marcar(id, usuario, temporadaActual.emitidos, !temporadaActual.todosVistos);
+    recargar();
+  };
+}
+
+// El episodio anterior y el siguiente, pasando de una temporada a otra
+function episodiosVecinos(serie, temporada, episodio) {
+  const cantidad = (t) => serie.seasons.find((s) => s.season_number === t)?.episode_count ?? 0;
+  let anterior = null;
+  let siguiente = null;
+  if (episodio > 1) anterior = { temporada, episodio: episodio - 1 };
+  else if (temporada > 1 && cantidad(temporada - 1)) anterior = { temporada: temporada - 1, episodio: cantidad(temporada - 1) };
+  if (episodio < cantidad(temporada)) siguiente = { temporada, episodio: episodio + 1 };
+  else if (temporada > 0 && cantidad(temporada + 1)) siguiente = { temporada: temporada + 1, episodio: 1 };
+  return { anterior, siguiente };
+}
+
+async function vistaEpisodio(id, temporada, episodio) {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  [id, temporada, episodio] = [id, temporada, episodio].map(Number);
+
+  const [serie, ep] = await Promise.all([
+    tmdb(`/tv/${id}`),
+    tmdb(`/tv/${id}/season/${temporada}/episode/${episodio}`),
+  ]);
+  const usuario = auth.usuarioActual();
+  const fueVisto = usuario && vistos.deSerie(id, usuario).has(`${temporada}x${episodio}`);
+  const { anterior, siguiente } = episodiosVecinos(serie, temporada, episodio);
+  const directores = ep.crew.filter((c) => c.job === "Director");
+  const guionistas = ep.crew.filter((c) => ["Writer", "Screenplay", "Teleplay"].includes(c.job));
+  const titulo = `${codigoEpisodio(temporada, episodio)} · ${ep.name}`;
+  const nombres = (personas) => [...new Set(personas.map((p) => p.name))].map(escapar).join(", ");
+
+  document.title = `${serie.name} ${titulo} · El "Santi"-Grial`;
+
+  return `
+    <div class="fondo-peli" style="${ep.still_path || serie.backdrop_path ? `background-image:url('${IMG}w1280${ep.still_path || serie.backdrop_path}')` : ""}">
+      <div class="detalle">
+        <a href="#/serie/${id}">
+          ${serie.poster_path
+            ? `<img class="poster" src="${IMG}w500${serie.poster_path}" alt="${escapar(serie.name)}">`
+            : `<div class="sin-poster">${escapar(serie.name)}</div>`}
+        </a>
+        <div>
+          <p class="miga">
+            <a href="#/serie/${id}">${escapar(serie.name)}</a> ›
+            <a href="${rutaTemporada(id, temporada)}">${temporada ? `Temporada ${temporada}` : "Especiales"}</a>
+          </p>
+          <h1>${escapar(titulo)}</h1>
+          <div class="datos">
+            ${ep.air_date ? `<span>📅 ${yaSalio(ep.air_date) ? "" : "Se estrena el "}${formatearDia(ep.air_date)}</span>` : ""}
+            ${ep.runtime ? `<span>⏱ ${ep.runtime} min</span>` : ""}
+            ${directores.length ? `<span>🎬 ${nombres(directores)}</span>` : ""}
+            ${guionistas.length ? `<span>✍ ${nombres(guionistas)}</span>` : ""}
+          </div>
+
+          <p>${escapar(ep.overview || "Sin sinopsis disponible.")}</p>
+
+          <div class="fila-form">
+            ${anterior ? `<a class="btn secundario chico" href="${rutaEpisodio(id, anterior.temporada, anterior.episodio)}">← ${codigoEpisodio(anterior.temporada, anterior.episodio)}</a>` : ""}
+            ${usuario && yaSalio(ep.air_date) ? `
+              <button class="btn chico ${fueVisto ? "secundario" : ""}" id="btn-episodio-visto">
+                ${fueVisto ? "✓ Visto · desmarcar" : "Marcar como visto"}
+              </button>` : ""}
+            ${siguiente ? `<a class="btn secundario chico" href="${rutaEpisodio(id, siguiente.temporada, siguiente.episodio)}">${codigoEpisodio(siguiente.temporada, siguiente.episodio)} →</a>` : ""}
+          </div>
+
+          ${bloquePuntajes(claveEpisodio(id, temporada, episodio), ep.vote_average, ep.vote_count)}
+        </div>
+      </div>
+    </div>
+
+    ${ep.guest_stars.length ? seccionReparto(ep.guest_stars, "Invitados") : ""}
+    ${seccionComentarios(claveEpisodio(id, temporada, episodio), titulo)}`;
+}
+
+function eventosEpisodio(id, temporada, episodio) {
+  [id, temporada, episodio] = [id, temporada, episodio].map(Number);
+  eventosOpiniones(claveEpisodio(id, temporada, episodio));
+
+  const usuario = auth.usuarioActual();
+  const boton = document.getElementById("btn-episodio-visto");
+  if (!usuario || !boton) return;
+  boton.onclick = () => {
+    const ep = `${temporada}x${episodio}`;
+    vistos.marcar(id, usuario, [ep], !vistos.deSerie(id, usuario).has(ep));
+    recargar();
+  };
+}
+
 // ---------- Panel de administración ----------
 let ultimaBusquedaAdmin = "";
+
+// Lista del catálogo en el panel: se filtra y se muestra de a CANTIDAD_CATALOGO_ADMIN
+// (el filtro y la cantidad se mantienen al recargar el panel)
+const CANTIDAD_CATALOGO_ADMIN = 10;
+let catalogoAdmin = [];
+let filtroCatalogoAdmin = { texto: "", tipo: "" };
+let limiteCatalogoAdmin = CANTIDAD_CATALOGO_ADMIN;
+
+function sinAcentos(texto) {
+  return String(texto ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+function dibujarCatalogoAdmin() {
+  const texto = sinAcentos(filtroCatalogoAdmin.texto.trim()).replace(/^#/, "");
+  const filtradas = catalogoAdmin.filter((o) =>
+    (!filtroCatalogoAdmin.tipo || o.tipo === filtroCatalogoAdmin.tipo) &&
+    (!texto || sinAcentos(o.titulo).includes(texto) || o.tags.some((t) => t.includes(texto)) || String(o.id) === texto));
+  const visibles = filtradas.slice(0, limiteCatalogoAdmin);
+
+  if (!filtradas.length) {
+    return `<p class="suave">${catalogoAdmin.length ? "No hay nada que coincida con la búsqueda." : "El catálogo está vacío."}</p>`;
+  }
+  return `
+    <div class="lista-admin">
+      ${visibles.map((o) => `
+        <div class="fila-admin">
+          <a class="crece" href="${rutaObra(o.tipo, o.id)}">
+            ${escapar(o.titulo || `${o.tipo === "serie" ? "Serie" : "Película"} ${o.id}`)}
+            ${o.tipo === "serie" ? `<span class="insignia">serie</span>` : ""}
+          </a>
+          <div class="tags">
+            ${o.tags.map((t) => `
+              <span class="tag especial">#${escapar(t)}
+                <button class="quitar-tag" data-clave="${o.clave}" data-quitar-tag="${escapar(t)}" title="Quitar tag">✕</button>
+              </span>`).join("")}
+          </div>
+          <form class="form-tag-fila" data-clave="${o.clave}">
+            <input type="text" name="tag" list="lista-tags" placeholder="+ tag" required>
+          </form>
+          <button class="btn-link" data-quitar-obra="${o.clave}">Quitar</button>
+        </div>`).join("")}
+    </div>
+    <div class="fila-form">
+      <span class="suave crece">Mostrando ${visibles.length} de ${filtradas.length}</span>
+      ${filtradas.length > visibles.length
+        ? `<button class="btn secundario chico" id="ver-mas-catalogo">Mostrar ${Math.min(CANTIDAD_CATALOGO_ADMIN, filtradas.length - visibles.length)} más</button>`
+        : ""}
+    </div>`;
+}
+
+// Se llama cada vez que se redibuja la lista del catálogo
+function eventosCatalogoAdmin() {
+  const lista = document.getElementById("lista-catalogo-admin");
+
+  lista.querySelectorAll(".form-tag-fila").forEach((f) => {
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const tag = normalizarTag(f.elements.tag.value);
+      if (!tag) return;
+      await catalogo.agregarTag(f.dataset.clave, "", tag);
+      renderMenu();
+      recargar();
+    };
+  });
+
+  lista.querySelectorAll(".quitar-tag[data-clave]").forEach((b) => {
+    b.onclick = async () => {
+      await catalogo.quitarTag(b.dataset.clave, b.dataset.quitarTag);
+      recargar();
+    };
+  });
+
+  lista.querySelectorAll("[data-quitar-obra]").forEach((b) => {
+    b.onclick = () => {
+      if (!confirm("¿Quitar esto del catálogo?")) return;
+      catalogo.quitar(b.dataset.quitarObra);
+      recargar();
+    };
+  });
+
+  const verMas = document.getElementById("ver-mas-catalogo");
+  if (verMas) verMas.onclick = () => {
+    limiteCatalogoAdmin += CANTIDAD_CATALOGO_ADMIN;
+    redibujarCatalogoAdmin();
+  };
+}
+
+function redibujarCatalogoAdmin() {
+  document.getElementById("lista-catalogo-admin").innerHTML = dibujarCatalogoAdmin();
+  eventosCatalogoAdmin();
+}
 
 async function vistaAdmin() {
   if (!auth.esAdmin()) {
@@ -769,9 +1416,9 @@ async function vistaAdmin() {
       </div>`;
   }
 
-  const pelis = (await catalogo.todas()).sort((a, b) => (a.titulo ?? "").localeCompare(b.titulo ?? ""));
+  catalogoAdmin = (await catalogo.todas()).sort((a, b) => (a.titulo ?? "").localeCompare(b.titulo ?? ""));
   const tags = etiquetas.todas();
-  const cantidad = (tag) => pelis.filter((p) => p.tags.includes(tag)).length;
+  const cantidad = (tag) => catalogoAdmin.filter((o) => o.tags.includes(tag)).length;
   document.title = `Admin · El "Santi"-Grial`;
 
   return `
@@ -779,9 +1426,9 @@ async function vistaAdmin() {
     ${datalistTags()}
 
     <section class="seccion panel">
-      <h2>Agregar película</h2>
+      <h2>Agregar película o serie</h2>
       <form id="form-buscar-admin" class="fila-form">
-        <input type="text" name="q" placeholder="Buscar en TMDB…" required value="${escapar(ultimaBusquedaAdmin)}">
+        <input type="text" name="q" placeholder="Buscar películas y series en TMDB…" required value="${escapar(ultimaBusquedaAdmin)}">
         <button class="btn">Buscar</button>
       </form>
       <div id="resultados-admin"></div>
@@ -793,7 +1440,7 @@ async function vistaAdmin() {
         ${Object.entries(tags).map(([t, info]) => `
           <div class="fila-admin">
             <a class="tag especial" href="#/tag/${encodeURIComponent(t)}">#${escapar(t)}</a>
-            <span class="suave crece">${escapar(info.descripcion || "Sin descripción")} · ${cantidad(t)} películas</span>
+            <span class="suave crece">${escapar(info.descripcion || "Sin descripción")} · ${cantidad(t)} en el catálogo</span>
             <button class="btn-link" data-borrar-tag="${escapar(t)}">Borrar</button>
           </div>`).join("") || `<p class="suave">No hay tags.</p>`}
       </div>
@@ -805,23 +1452,16 @@ async function vistaAdmin() {
     </section>
 
     <section class="seccion panel">
-      <h2>Catálogo (${pelis.length})</h2>
-      <div class="lista-admin">
-        ${pelis.map((p) => `
-          <div class="fila-admin">
-            <a class="crece" href="#/pelicula/${p.id}">${escapar(p.titulo || `Película ${p.id}`)}</a>
-            <div class="tags">
-              ${p.tags.map((t) => `
-                <span class="tag especial">#${escapar(t)}
-                  <button class="quitar-tag" data-id="${p.id}" data-quitar-tag="${escapar(t)}" title="Quitar tag">✕</button>
-                </span>`).join("")}
-            </div>
-            <form class="form-tag-fila" data-id="${p.id}">
-              <input type="text" name="tag" list="lista-tags" placeholder="+ tag" required>
-            </form>
-            <button class="btn-link" data-quitar-peli="${p.id}">Quitar</button>
-          </div>`).join("") || `<p class="suave">El catálogo está vacío.</p>`}
+      <h2>Catálogo <span class="suave" style="font-size:1rem">${cantidadObras(catalogoAdmin)}</span></h2>
+      <div class="fila-form">
+        <input type="search" id="buscar-catalogo-admin" placeholder="Buscar en el catálogo por título o #tag…"
+          value="${escapar(filtroCatalogoAdmin.texto)}" autocomplete="off">
+        <select id="tipo-catalogo-admin">
+          ${Object.entries(TIPOS_LISTADO).map(([valor, texto]) =>
+            `<option value="${valor}" ${filtroCatalogoAdmin.tipo === valor ? "selected" : ""}>${texto}</option>`).join("")}
+        </select>
       </div>
+      <div id="lista-catalogo-admin">${dibujarCatalogoAdmin()}</div>
     </section>
 
     <section class="seccion panel">
@@ -843,19 +1483,26 @@ async function buscarParaAdmin(q) {
   const contenedor = document.getElementById("resultados-admin");
   contenedor.innerHTML = `<p class="suave">Buscando…</p>`;
 
-  const [{ results }, enCatalogo] = await Promise.all([tmdb("/search/movie", { query: q }), catalogo.todas()]);
-  const ids = new Set(enCatalogo.map((p) => p.id));
+  const [{ results }, enCatalogo] = await Promise.all([tmdb("/search/multi", { query: q }), catalogo.todas()]);
+  const claves = new Set(enCatalogo.map((o) => o.clave));
+  const obras = results.filter((r) => ["movie", "tv"].includes(r.media_type)).map((r) => {
+    const tipo = r.media_type === "tv" ? "serie" : "pelicula";
+    return { ...r, tipo, clave: claveCatalogo(tipo, r.id) };
+  });
 
   contenedor.innerHTML = `<div class="lista-admin">
-    ${results.slice(0, 10).map((p) => `
+    ${obras.slice(0, 10).map((o) => `
       <div class="fila-admin">
-        ${p.poster_path
-          ? `<img class="mini" src="${IMG}w92${p.poster_path}" alt="">`
+        ${o.poster_path
+          ? `<img class="mini" src="${IMG}w92${o.poster_path}" alt="">`
           : `<div class="mini sin-poster"></div>`}
-        <a class="crece" href="#/pelicula/${p.id}">${escapar(p.title)} <span class="suave">(${anio(p.release_date)})</span></a>
-        ${ids.has(p.id)
+        <a class="crece" href="${rutaObra(o.tipo, o.id)}">
+          ${escapar(tituloDe(o))} <span class="suave">(${anio(fechaDe(o))})</span>
+          ${o.tipo === "serie" ? `<span class="insignia">serie</span>` : ""}
+        </a>
+        ${claves.has(o.clave)
           ? `<span class="suave">Ya está en el catálogo</span>`
-          : `<form class="form-agregar fila-form" data-id="${p.id}" data-titulo="${escapar(p.title)}">
+          : `<form class="form-agregar fila-form" data-clave="${o.clave}" data-titulo="${escapar(tituloDe(o))}">
                <input type="text" name="tags" placeholder="tags separados por coma">
                <button class="btn chico">Agregar</button>
              </form>`}
@@ -866,7 +1513,7 @@ async function buscarParaAdmin(q) {
     f.onsubmit = (e) => {
       e.preventDefault();
       const tags = f.elements.tags.value.split(",").map(normalizarTag).filter(Boolean);
-      catalogo.agregar(Number(f.dataset.id), f.dataset.titulo, tags);
+      catalogo.agregar(f.dataset.clave, f.dataset.titulo, tags);
       renderMenu();
       recargar();
     };
@@ -898,38 +1545,23 @@ function eventosAdmin() {
 
   document.querySelectorAll("[data-borrar-tag]").forEach((b) => {
     b.onclick = async () => {
-      if (!confirm(`¿Borrar #${b.dataset.borrarTag}? Se quita de todas las películas.`)) return;
+      if (!confirm(`¿Borrar #${b.dataset.borrarTag}? Se quita de todas las películas y series.`)) return;
       await etiquetas.borrar(b.dataset.borrarTag);
       renderMenu();
       recargar();
     };
   });
 
-  document.querySelectorAll(".form-tag-fila").forEach((f) => {
-    f.onsubmit = async (e) => {
-      e.preventDefault();
-      const tag = normalizarTag(f.elements.tag.value);
-      if (!tag) return;
-      await catalogo.agregarTag(Number(f.dataset.id), "", tag);
-      renderMenu();
-      recargar();
-    };
-  });
-
-  document.querySelectorAll(".quitar-tag[data-id]").forEach((b) => {
-    b.onclick = async () => {
-      await catalogo.quitarTag(Number(b.dataset.id), b.dataset.quitarTag);
-      recargar();
-    };
-  });
-
-  document.querySelectorAll("[data-quitar-peli]").forEach((b) => {
-    b.onclick = () => {
-      if (!confirm("¿Quitar esta película del catálogo?")) return;
-      catalogo.quitar(Number(b.dataset.quitarPeli));
-      recargar();
-    };
-  });
+  const buscarCatalogo = document.getElementById("buscar-catalogo-admin");
+  const tipoCatalogo = document.getElementById("tipo-catalogo-admin");
+  const filtrarCatalogo = () => {
+    filtroCatalogoAdmin = { texto: buscarCatalogo.value, tipo: tipoCatalogo.value };
+    limiteCatalogoAdmin = CANTIDAD_CATALOGO_ADMIN;
+    redibujarCatalogoAdmin();
+  };
+  buscarCatalogo.oninput = filtrarCatalogo;
+  tipoCatalogo.onchange = filtrarCatalogo;
+  eventosCatalogoAdmin();
 
   document.getElementById("exportar-peliculas").onclick = exportarPeliculas;
   document.getElementById("exportar-tags").onclick = exportarTags;
@@ -945,15 +1577,22 @@ function eventosAdmin() {
 async function vistaBusqueda(q) {
   if (!hayCredenciales()) return avisoSinCredenciales();
   q = decodeURIComponent(q);
-  const { results } = await tmdb("/search/movie", { query: q });
+  // /search/multi trae películas, series y personas; las personas no se muestran
+  const { results } = await tmdb("/search/multi", { query: q });
+  const pelis = results.filter((r) => r.media_type === "movie");
+  const series = results.filter((r) => r.media_type === "tv");
   document.title = `Buscar "${q}" · El "Santi"-Grial`;
+
+  const grupo = (titulo, lista) => lista.length ? `
+    <h3 class="titulo-genero">${titulo} <span class="suave">(${lista.length})</span></h3>
+    <div class="grilla">${lista.map((o) => tarjeta(o)).join("")}</div>` : "";
 
   return `
     <section class="seccion">
       <h2>Resultados para "${escapar(q)}"</h2>
-      ${results.length
-        ? `<div class="grilla">${results.map(tarjeta).join("")}</div>`
-        : `<p class="suave">No se encontraron películas.</p>`}
+      ${pelis.length || series.length
+        ? grupo("Películas", pelis) + grupo("Series", series)
+        : `<p class="suave">No se encontraron películas ni series.</p>`}
     </section>`;
 }
 
@@ -1021,6 +1660,27 @@ function eventosLogin() {
   };
 }
 
+// Título, link y tarjeta de una película, serie o episodio a partir de su clave de ratings/comentarios
+async function obraDeClave(clave) {
+  const episodio = clave.match(/^serie-(\d+)-(\d+)x(\d+)$/);
+  if (episodio) {
+    const [, id, t, e] = episodio.map(Number);
+    const [serie, ep] = await Promise.all([tmdb(`/tv/${id}`), tmdb(`/tv/${id}/season/${t}/episode/${e}`)]);
+    const titulo = `${serie.name} · ${codigoEpisodio(t, e)} ${ep.name}`;
+    const href = rutaEpisodio(id, t, e);
+    return { titulo, href, tarjeta: tarjeta({ ...serie, name: titulo, vote_average: ep.vote_average }, href) };
+  }
+
+  const serie = clave.match(/^serie-(\d+)$/);
+  if (serie) {
+    const datos = await tmdb(`/tv/${serie[1]}`);
+    return { titulo: datos.name, href: `#/serie/${datos.id}`, tarjeta: tarjeta(datos) };
+  }
+
+  const peli = await tmdb(`/movie/${clave}`);
+  return { titulo: peli.title, href: `#/pelicula/${peli.id}`, tarjeta: tarjeta(peli) };
+}
+
 async function vistaPerfil() {
   const usuario = auth.usuarioActual();
   if (!usuario) {
@@ -1032,18 +1692,16 @@ async function vistaPerfil() {
   const todosRatings = store.leer("ratings", {});
   const misRatings = Object.entries(todosRatings)
     .filter(([, r]) => r[usuario])
-    .map(([id, r]) => ({ id: Number(id), valor: r[usuario] }));
+    .map(([clave, r]) => ({ clave, valor: r[usuario] }));
 
   const todosComentarios = store.leer("comentarios", {});
   const misComentarios = Object.entries(todosComentarios)
-    .flatMap(([id, lista]) => lista.filter((c) => c.autor === usuario).map((c) => ({ ...c, peliId: Number(id) })))
+    .flatMap(([clave, lista]) => lista.filter((c) => c.autor === usuario).map((c) => ({ ...c, clave })))
     .sort((a, b) => b.fecha.localeCompare(a.fecha));
 
-  const ids = [...new Set([...misRatings.map((r) => r.id), ...misComentarios.map((c) => c.peliId)])];
-  const pelis = Object.fromEntries(
-    (await Promise.all(ids.map((id) => tmdb(`/movie/${id}`).catch(() => null))))
-      .filter(Boolean)
-      .map((p) => [p.id, p]),
+  const claves = [...new Set([...misRatings.map((r) => r.clave), ...misComentarios.map((c) => c.clave)])];
+  const obras = Object.fromEntries(
+    await Promise.all(claves.map(async (clave) => [clave, await obraDeClave(clave).catch(() => null)])),
   );
   document.title = `${usuario} · El "Santi"-Grial`;
 
@@ -1054,12 +1712,12 @@ async function vistaPerfil() {
     <section class="seccion">
       <h2>Mis puntuaciones (${misRatings.length})</h2>
       ${misRatings.length
-        ? `<div class="grilla">${misRatings.filter((r) => pelis[r.id]).map((r) => `
+        ? `<div class="grilla">${misRatings.filter((r) => obras[r.clave]).map((r) => `
             <div>
-              ${tarjeta(pelis[r.id])}
+              ${obras[r.clave].tarjeta}
               <div style="margin-top:6px">${estrellas(r.valor, false)}</div>
             </div>`).join("")}</div>`
-        : `<p class="suave">Todavía no puntuaste ninguna película.</p>`}
+        : `<p class="suave">Todavía no puntuaste nada.</p>`}
     </section>
     <section class="seccion">
       <h2>Mis comentarios (${misComentarios.length})</h2>
@@ -1067,7 +1725,9 @@ async function vistaPerfil() {
         ${misComentarios.map((c) => `
           <div class="comentario">
             <div class="cabecera">
-              <a class="autor" href="#/pelicula/${c.peliId}">${escapar(pelis[c.peliId]?.title ?? "Película")}</a>
+              ${obras[c.clave]
+                ? `<a class="autor" href="${obras[c.clave].href}">${escapar(obras[c.clave].titulo)}</a>`
+                : `<span class="autor">Sin datos</span>`}
               <span class="fecha">${formatearFecha(c.fecha)}</span>
             </div>
             <p>${escapar(c.texto)}</p>
@@ -1086,13 +1746,17 @@ function vistaNoEncontrada() {
 }
 
 // ---------------------------------------------------------------
-//  Router (rutas por hash: #/pelicula/27205, #/tag/santiagod, ...)
+//  Router (rutas por hash: #/pelicula/27205, #/serie/1399/temporada/1, ...)
 // ---------------------------------------------------------------
 const rutas = [
   { patron: /^\/?$/, vista: vistaInicio },
   { patron: /^\/login$/, vista: vistaLogin, despues: eventosLogin },
   { patron: /^\/perfil$/, vista: vistaPerfil },
   { patron: /^\/pelicula\/(\d+)$/, vista: vistaPelicula, despues: eventosPelicula },
+  { patron: /^\/series$/, vista: vistaSeries },
+  { patron: /^\/serie\/(\d+)$/, vista: vistaSerie, despues: eventosSerie },
+  { patron: /^\/serie\/(\d+)\/temporada\/(\d+)$/, vista: vistaTemporada, despues: eventosTemporada },
+  { patron: /^\/serie\/(\d+)\/temporada\/(\d+)\/episodio\/(\d+)$/, vista: vistaEpisodio, despues: eventosEpisodio },
   { patron: /^\/tag\/([^/]+)$/, vista: vistaTag, despues: eventosListado },
   { patron: /^\/catalogo$/, vista: vistaCatalogo, despues: eventosListado },
   { patron: /^\/admin$/, vista: vistaAdmin, despues: eventosAdmin },

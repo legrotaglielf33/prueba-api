@@ -1,5 +1,6 @@
-// Películas con tags predefinidos.
-// - id: el id de la película en TMDB (aparece en la URL de themoviedb.org/movie/<id>).
+// Películas y series del catálogo, con sus tags.
+// - id: el id en TMDB (aparece en la URL de themoviedb.org/movie/<id> o themoviedb.org/tv/<id>).
+// - tipo: "serie" para las series; si no está, es una película.
 // - Si no sabés el id, usá "buscar" (título) y "anio": la app la busca en TMDB y recuerda el resultado.
 // - titulo: sólo de referencia, la app muestra el título que devuelve TMDB.
 const PELICULAS = [

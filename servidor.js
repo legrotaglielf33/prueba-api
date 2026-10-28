@@ -13,7 +13,7 @@ const RAIZ = __dirname;
 const ARCHIVO = path.join(RAIZ, "datos", "guardados.json");
 
 // Las únicas claves que la página puede guardar
-const CLAVES = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo"];
+const CLAVES = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos"];
 
 const TIPOS = {
   ".html": "text/html; charset=utf-8",
