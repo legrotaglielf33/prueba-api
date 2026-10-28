@@ -38,7 +38,7 @@ function yaSalio(fecha) {
 
 // Estas claves se guardan en el servidor (datos/guardados.json) y las ven todos.
 // El resto (sesión, búsquedas en caché, preferencias) queda en este navegador.
-const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos"];
+const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos"];
 let datosServidor = {};
 
 const store = {
@@ -245,12 +245,141 @@ async function datosWiki(wikidataId) {
     articulo ? biografiaWikipedia(idioma, articulo).catch(() => null) : null,
     premiosWikidata(entidad).catch(() => ({ ganados: [], nominaciones: [] })),
   ]);
+  // Foto (P18): un archivo de Wikimedia Commons
+  const foto = entidad.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
   return {
     idioma,
     url: articulo ? `https://${idioma}.wikipedia.org/wiki/${encodeURIComponent(articulo.replace(/ /g, "_"))}` : null,
     biografia,
     premios,
+    imagen: foto ? `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(foto)}?width=500` : null,
   };
+}
+
+// ---------------------------------------------------------------
+//  MusicBrainz (artistas y discos) y Cover Art Archive (tapas).
+//  MusicBrainz permite un pedido por segundo: los pedidos hacen fila
+//  y las respuestas se guardan mientras la página esté abierta.
+// ---------------------------------------------------------------
+const MUSICBRAINZ = "https://musicbrainz.org/ws/2";
+const cacheMusicbrainz = new Map();
+let filaMusicbrainz = Promise.resolve();
+let ultimoPedidoMusicbrainz = 0;
+
+async function musicbrainz(ruta, params = {}) {
+  const url = new URL(MUSICBRAINZ + ruta);
+  for (const [k, v] of Object.entries({ ...params, fmt: "json" })) url.searchParams.set(k, v);
+  if (cacheMusicbrainz.has(url.href)) return cacheMusicbrainz.get(url.href);
+
+  const turno = filaMusicbrainz.then(async () => {
+    const espera = ultimoPedidoMusicbrainz + 1100 - Date.now();
+    if (espera > 0) await new Promise((r) => setTimeout(r, espera));
+    ultimoPedidoMusicbrainz = Date.now();
+  });
+  filaMusicbrainz = turno;
+  await turno;
+
+  const resp = await fetch(url, { headers: { Accept: "application/json" } });
+  // 503: se pasó el límite de pedidos; se reintenta una vez
+  if (resp.status === 503 && !params._reintento) return musicbrainz(ruta, { ...params, _reintento: 1 });
+  if (!resp.ok) throw new Error(`MusicBrainz respondió ${resp.status}`);
+  const datos = await resp.json();
+  cacheMusicbrainz.set(url.href, datos);
+  return datos;
+}
+
+function tapaDe(mbid, tamanio = 250) {
+  return `https://coverartarchive.org/release-group/${mbid}/front-${tamanio}`;
+}
+
+// "Soda Stereo" o "Charly García & Pedro Aznar", con links a cada artista
+function creditoArtistas(credito, conLinks = true) {
+  return (credito ?? []).map((c) => (conLinks
+    ? `<a class="link-persona" href="#/artista/${c.artist.id}">${escapar(c.name)}</a>`
+    : escapar(c.name)) + escapar(c.joinphrase ?? "")).join("");
+}
+
+function claveDisco(mbid) {
+  return `album-${mbid}`;
+}
+
+const TIPOS_DISCO = {
+  Album: "Álbum",
+  EP: "EP",
+  Single: "Simple",
+  Live: "En vivo",
+  Compilation: "Compilado",
+  Soundtrack: "Banda sonora",
+  Remix: "Remixes",
+  Demo: "Demo",
+  "DJ-mix": "DJ mix",
+  "Mixtape/Street": "Mixtape",
+  Interview: "Entrevistas",
+  Spokenword: "Hablado",
+  Audiobook: "Audiolibro",
+  Other: "Otro",
+};
+
+function tipoDisco(rg) {
+  const tipos = [rg["primary-type"], ...(rg["secondary-types"] ?? [])].filter(Boolean);
+  return tipos.map((t) => TIPOS_DISCO[t] ?? t).join(" · ") || "Otro";
+}
+
+// Datos básicos de los discos que alguien visitó, guardados en el servidor para no
+// volver a pedírselos a MusicBrainz (perfiles, charts): { [mbid]: { titulo, artistas, anio, tipo } }
+const discos = {
+  todos() {
+    return store.leer("discos", {});
+  },
+  de(mbid) {
+    return this.todos()[mbid] ?? null;
+  },
+  recordar(rg) {
+    if (this.de(rg.id)) return;
+    const todos = this.todos();
+    todos[rg.id] = {
+      titulo: rg.title,
+      artistas: (rg["artist-credit"] ?? []).map((c) => ({ id: c.artist.id, nombre: c.name, union: c.joinphrase ?? "" })),
+      anio: rg["first-release-date"]?.slice(0, 4) ?? null,
+      tipo: tipoDisco(rg),
+    };
+    store.guardar("discos", todos);
+  },
+};
+
+function nombreArtistas(disco) {
+  return disco.artistas.map((a) => a.nombre + a.union).join("");
+}
+
+// Tapa con el título detrás: si Cover Art Archive no tiene la imagen, queda el título
+function tapa(mbid, titulo, tamanio = 250) {
+  return `
+    <div class="tapa">
+      <span>${escapar(titulo)}</span>
+      <img src="${tapaDe(mbid, tamanio)}" alt="${escapar(titulo)}" loading="lazy" onerror="this.remove()">
+    </div>`;
+}
+
+function tarjetaDisco(mbid, { titulo, artistas = "", anio = null, tipo = "" }) {
+  const local = ratings.promedio(claveDisco(mbid));
+  return `
+    <a class="tarjeta disco" href="#/album/${mbid}">
+      ${tapa(mbid, titulo)}
+      <div class="info">
+        <h3>${escapar(titulo)}</h3>
+        ${artistas ? `<div class="artista">${escapar(artistas)}</div>` : ""}
+        <div class="meta">
+          <span>${anio ?? "s/f"}${tipo ? ` · ${escapar(tipo)}` : ""}</span>
+          ${local ? `<span>${local.valor.toFixed(1)}/5</span>` : ""}
+        </div>
+      </div>
+    </a>`;
+}
+
+function duracion(ms) {
+  if (!ms) return "";
+  const segundos = Math.round(ms / 1000);
+  return `${Math.floor(segundos / 60)}:${String(segundos % 60).padStart(2, "0")}`;
 }
 
 // ---------------------------------------------------------------
@@ -344,6 +473,114 @@ const comentarios = {
     store.guardar("comentarios", todos);
   },
 };
+
+// ---------------------------------------------------------------
+//  Reseñas: una por usuario y por película, serie o episodio.
+//  El puntaje de la reseña es el mismo que el de ratings (se mantienen iguales).
+// ---------------------------------------------------------------
+const resenas = {
+  // { [clave]: { [usuario]: { texto, puntaje, spoiler, fecha, editada, likes: [usuarios] } } }
+  deObra(clave) {
+    return store.leer("resenas", {})[clave] ?? {};
+  },
+  de(clave, usuario) {
+    return this.deObra(clave)[usuario] ?? null;
+  },
+  guardar(clave, usuario, { texto, puntaje, spoiler }) {
+    const todas = store.leer("resenas", {});
+    const previa = todas[clave]?.[usuario];
+    const ahora = new Date().toISOString();
+    todas[clave] = {
+      ...(todas[clave] ?? {}),
+      [usuario]: {
+        texto, puntaje, spoiler,
+        fecha: previa?.fecha ?? ahora,
+        editada: previa ? ahora : null,
+        likes: previa?.likes ?? [],
+      },
+    };
+    store.guardar("resenas", todas);
+    ratings.poner(clave, usuario, puntaje);
+  },
+  // Cuando el usuario cambia las estrellas de arriba, su reseña acompaña
+  actualizarPuntaje(clave, usuario, puntaje) {
+    const todas = store.leer("resenas", {});
+    if (!todas[clave]?.[usuario]) return;
+    todas[clave][usuario].puntaje = puntaje;
+    store.guardar("resenas", todas);
+  },
+  borrar(clave, usuario) {
+    const todas = store.leer("resenas", {});
+    if (todas[clave]) delete todas[clave][usuario];
+    store.guardar("resenas", todas);
+  },
+  alternarLike(clave, autor, usuario) {
+    const todas = store.leer("resenas", {});
+    const resena = todas[clave]?.[autor];
+    if (!resena) return;
+    resena.likes = resena.likes.includes(usuario)
+      ? resena.likes.filter((u) => u !== usuario)
+      : [...resena.likes, usuario];
+    store.guardar("resenas", todas);
+  },
+  // Todas, como lista: [{ clave, autor, texto, puntaje, ... }], las más nuevas primero
+  todas() {
+    return Object.entries(store.leer("resenas", {}))
+      .flatMap(([clave, porUsuario]) => Object.entries(porUsuario).map(([autor, r]) => ({ clave, autor, ...r })))
+      .sort((a, b) => b.fecha.localeCompare(a.fecha));
+  },
+  deUsuario(usuario) {
+    return this.todas().filter((r) => r.autor === usuario);
+  },
+};
+
+// ---------------------------------------------------------------
+//  Amigos: uno manda la solicitud y el otro la acepta
+// ---------------------------------------------------------------
+const amigos = {
+  // { [usuario]: { [otro]: "amigos" | "enviada" | "recibida" } }
+  estado(usuario, otro) {
+    return store.leer("amigos", {})[usuario]?.[otro] ?? null;
+  },
+  de(usuario) {
+    return Object.entries(store.leer("amigos", {})[usuario] ?? {})
+      .filter(([, estado]) => estado === "amigos").map(([otro]) => otro).sort();
+  },
+  recibidas(usuario) {
+    return Object.entries(store.leer("amigos", {})[usuario] ?? {})
+      .filter(([, estado]) => estado === "recibida").map(([otro]) => otro);
+  },
+  enviadas(usuario) {
+    return Object.entries(store.leer("amigos", {})[usuario] ?? {})
+      .filter(([, estado]) => estado === "enviada").map(([otro]) => otro);
+  },
+  cambiar(usuario, otro, suyo, delOtro) {
+    const todos = store.leer("amigos", {});
+    todos[usuario] = { ...(todos[usuario] ?? {}) };
+    todos[otro] = { ...(todos[otro] ?? {}) };
+    if (suyo) todos[usuario][otro] = suyo; else delete todos[usuario][otro];
+    if (delOtro) todos[otro][usuario] = delOtro; else delete todos[otro][usuario];
+    store.guardar("amigos", todos);
+  },
+  pedir(usuario, otro) {
+    // Si el otro ya le había mandado una solicitud, pedir es aceptarla
+    if (this.estado(usuario, otro) === "recibida") this.aceptar(usuario, otro);
+    else this.cambiar(usuario, otro, "enviada", "recibida");
+  },
+  aceptar(usuario, otro) {
+    this.cambiar(usuario, otro, "amigos", "amigos");
+  },
+  // Sirve para rechazar, cancelar una solicitud o dejar de ser amigos
+  quitar(usuario, otro) {
+    this.cambiar(usuario, otro, null, null);
+  },
+};
+
+// Nombres de todas las cuentas (las de datos/usuarios.js y las creadas)
+function todosLosUsuarios() {
+  return [...new Set([...USUARIOS, ...usuariosLocales()].map((u) => u.usuario))]
+    .sort((a, b) => a.localeCompare(b));
+}
 
 // ---------------------------------------------------------------
 //  Episodios vistos (cada episodio es "temporada x episodio": "1x5")
@@ -581,15 +818,16 @@ function tarjetaPersona(persona) {
 }
 
 // Puntaje de TMDB, promedio del sitio y las estrellas del usuario
-function bloquePuntajes(clave, votoTmdb, votosTmdb) {
+// fuente: de dónde sale el puntaje externo (TMDB puntúa sobre 10, MusicBrainz sobre 5)
+function bloquePuntajes(clave, votoExterno, votosExternos, fuente = { nombre: "TMDB", maximo: 10 }) {
   const usuario = auth.usuarioActual();
   const miRating = usuario ? ratings.dePelicula(clave)[usuario] ?? 0 : 0;
   const promedio = ratings.promedio(clave);
   return `
     <div class="puntajes">
       <div class="puntaje">
-        <div class="valor">${votoTmdb ? votoTmdb.toFixed(1) : "–"}<small>/10</small></div>
-        <div class="etiqueta">TMDB · ${(votosTmdb ?? 0).toLocaleString("es-AR")} votos</div>
+        <div class="valor">${votoExterno ? votoExterno.toFixed(1) : "–"}<small>/${fuente.maximo}</small></div>
+        <div class="etiqueta">${fuente.nombre} · ${(votosExternos ?? 0).toLocaleString("es-AR")} votos</div>
       </div>
       <div class="puntaje">
         <div class="valor">${promedio ? promedio.valor.toFixed(1) : "–"}<small>/5</small></div>
@@ -604,38 +842,207 @@ function bloquePuntajes(clave, votoTmdb, votosTmdb) {
     </div>`;
 }
 
-function seccionComentarios(clave, titulo) {
+// ---------- Usuarios, reseñas y amigos ----------
+// Círculo con la inicial; el color sale del nombre, así cada usuario tiene siempre el mismo
+function avatar(nombre, grande = false) {
+  const tono = [...nombre].reduce((suma, c) => suma + c.charCodeAt(0) * 7, 0) % 360;
+  return `<span class="avatar ${grande ? "grande" : ""}" style="--tono:${tono}">${escapar(nombre[0].toUpperCase())}</span>`;
+}
+
+function linkUsuario(nombre) {
+  return `<a class="link-usuario" href="#/usuario/${encodeURIComponent(nombre)}">${avatar(nombre)}${escapar(nombre)}</a>`;
+}
+
+// Una reseña. En los perfiles y en Comunidad se muestra de qué película o serie es (obra);
+// en los perfiles no hace falta repetir el autor (autor: false).
+function tarjetaResena(r, { obra = null, autor = true } = {}) {
   const usuario = auth.usuarioActual();
-  const lista = comentarios.dePelicula(clave);
+  const propia = r.autor === usuario;
+  const esAmigo = usuario && !propia && amigos.estado(usuario, r.autor) === "amigos";
+  const texto = `<p>${escapar(r.texto)}</p>`;
   return `
-    <section class="seccion">
-      <h2>Comentarios (${lista.length})</h2>
-      ${usuario
-        ? `<form class="form-comentario" id="form-comentario">
-             <textarea name="texto" placeholder="¿Qué te pareció ${escapar(titulo)}?" maxlength="1000" required></textarea>
-             <button class="btn">Publicar</button>
-           </form>`
-        : `<p class="aviso"><a href="#/login" style="color:var(--acento)">Ingresá</a> para dejar un comentario.</p>`}
-      <div class="comentarios">
-        ${lista.map((c) => {
-          const suRating = ratings.dePelicula(clave)[c.autor];
-          return `
-            <div class="comentario">
-              <div class="cabecera">
-                <div>
-                  <span class="autor">${escapar(c.autor)}</span>
-                  ${suRating ? estrellas(suRating, false) : ""}
-                </div>
-                <div>
-                  <span class="fecha">${formatearFecha(c.fecha)}</span>
-                  ${c.autor === usuario ? `<button class="btn-link" data-borrar="${c.id}">Borrar</button>` : ""}
-                </div>
-              </div>
-              <p>${escapar(c.texto)}</p>
-            </div>`;
-        }).join("") || `<p class="suave">Todavía no hay comentarios. ¡Sé el primero!</p>`}
+    <article class="resena ${propia ? "propia" : ""}" data-clave="${escapar(r.clave)}" data-autor="${escapar(r.autor)}">
+      ${obra ? `
+        <a href="${obra.href}">
+          ${obra.imagen ? `<img class="mini" src="${obra.imagen}" alt="" loading="lazy">` : `<div class="mini sin-poster"></div>`}
+        </a>` : ""}
+      <div class="cuerpo">
+        <div class="cabecera">
+          <div class="quien">
+            ${obra ? `<a class="autor" href="${obra.href}">${escapar(obra.titulo)}</a>` : ""}
+            ${autor ? linkUsuario(r.autor) : ""}
+            ${esAmigo ? `<span class="insignia">amigo</span>` : ""}
+            ${estrellas(r.puntaje, false)}
+          </div>
+          <span class="fecha">${formatearFecha(r.fecha)}${r.editada ? " · editada" : ""}</span>
+        </div>
+        ${r.spoiler ? `
+          <details class="spoiler">
+            <summary>⚠ Esta reseña tiene spoilers. Mostrar</summary>
+            ${texto}
+          </details>` : texto}
+        <div class="acciones">
+          ${usuario && !propia
+            ? `<button class="btn-like ${r.likes.includes(usuario) ? "activo" : ""}" data-like title="Me gusta">♥ ${r.likes.length}</button>`
+            : `<span class="suave" title="Me gusta">♥ ${r.likes.length}</span>`}
+          ${propia && !obra ? `
+            <button class="btn-link editar" data-editar-resena>Editar</button>
+            <button class="btn-link" data-borrar-resena>Borrar</button>` : ""}
+        </div>
       </div>
+    </article>`;
+}
+
+// Si se está editando la propia reseña (se vuelve a false al cambiar de página)
+let editandoResena = false;
+
+const ORDENES_RESENAS = {
+  relevantes: "Más relevantes",
+  recientes: "Más recientes",
+  mejores: "Mejor puntuadas",
+  peores: "Peor puntuadas",
+};
+
+function formResena(titulo, previa) {
+  const editando = Boolean(previa.texto);
+  return `
+    <form class="form-resena" id="form-resena">
+      <div class="fila-puntaje">
+        <span>Tu puntuación</span>
+        <div id="estrellas-resena">${estrellas(previa.puntaje ?? 0, true)}</div>
+        <input type="hidden" name="puntaje" value="${previa.puntaje ?? 0}">
+      </div>
+      <textarea name="texto" placeholder="Escribí tu reseña de ${escapar(titulo)}…" maxlength="3000" required>${escapar(previa.texto ?? "")}</textarea>
+      <div class="fila-form">
+        <label class="check-visto"><input type="checkbox" name="spoiler" ${previa.spoiler ? "checked" : ""}> Contiene spoilers</label>
+        <p class="mensaje-error crece" id="error-resena"></p>
+        ${editando ? `<button type="button" class="btn secundario" id="cancelar-resena">Cancelar</button>` : ""}
+        <button class="btn">${editando ? "Guardar cambios" : "Publicar reseña"}</button>
+      </div>
+    </form>`;
+}
+
+function seccionResenas(clave, titulo) {
+  const usuario = auth.usuarioActual();
+  const mia = usuario ? resenas.de(clave, usuario) : null;
+  const orden = store.leer("orden_resenas", "relevantes");
+  const misAmigos = new Set(usuario ? amigos.de(usuario) : []);
+  const lista = Object.entries(resenas.deObra(clave)).map(([autor, r]) => ({ clave, autor, ...r }));
+  const porFecha = (a, b) => b.fecha.localeCompare(a.fecha);
+  const comparar = {
+    // Primero la propia, después las de amigos y después las que más gustaron
+    relevantes: (a, b) => (b.autor === usuario) - (a.autor === usuario)
+      || misAmigos.has(b.autor) - misAmigos.has(a.autor)
+      || b.likes.length - a.likes.length
+      || porFecha(a, b),
+    recientes: porFecha,
+    mejores: (a, b) => b.puntaje - a.puntaje || porFecha(a, b),
+    peores: (a, b) => a.puntaje - b.puntaje || porFecha(a, b),
+  }[orden] ?? porFecha;
+  const visibles = lista.filter((r) => !(editandoResena && r.autor === usuario)).sort(comparar);
+  const viejos = comentarios.dePelicula(clave);
+
+  return `
+    <section class="seccion" id="resenas">
+      <h2>Reseñas (${lista.length})</h2>
+      ${!usuario
+        ? `<p class="aviso"><a href="#/login" style="color:var(--acento)">Ingresá</a> para escribir una reseña.</p>`
+        : !mia || editandoResena
+          ? formResena(titulo, mia ?? { puntaje: ratings.dePelicula(clave)[usuario] ?? 0 })
+          : ""}
+      ${lista.length > 1 ? `
+        <div class="controles">
+          <label>Ordenar por
+            <select id="orden-resenas">
+              ${Object.entries(ORDENES_RESENAS).map(([valor, texto]) =>
+                `<option value="${valor}" ${orden === valor ? "selected" : ""}>${texto}</option>`).join("")}
+            </select>
+          </label>
+        </div>` : ""}
+      <div class="resenas">
+        ${visibles.map((r) => tarjetaResena(r)).join("")
+          || (editandoResena ? "" : `<p class="suave">Todavía no hay reseñas. ¡Escribí la primera!</p>`)}
+      </div>
+      ${viejos.length ? `
+        <details class="desplegable">
+          <summary>Comentarios anteriores (${viejos.length})</summary>
+          <div class="comentarios">
+            ${viejos.map((c) => `
+              <div class="comentario">
+                <div class="cabecera">
+                  ${linkUsuario(c.autor)}
+                  <div>
+                    <span class="fecha">${formatearFecha(c.fecha)}</span>
+                    ${c.autor === usuario ? `<button class="btn-link" data-borrar="${c.id}">Borrar</button>` : ""}
+                  </div>
+                </div>
+                <p>${escapar(c.texto)}</p>
+              </div>`).join("")}
+          </div>
+        </details>` : ""}
     </section>`;
+}
+
+// Botones de "me gusta" de las reseñas (en las páginas de obras, perfiles y Comunidad)
+function eventosLikes() {
+  const usuario = auth.usuarioActual();
+  if (!usuario) return;
+  document.querySelectorAll("[data-like]").forEach((b) => {
+    b.onclick = () => {
+      const { clave, autor } = b.closest(".resena").dataset;
+      resenas.alternarLike(clave, autor, usuario);
+      recargar();
+    };
+  });
+}
+
+// Botón para agregar, aceptar, rechazar o quitar a otro usuario
+function botonAmistad(otro) {
+  const usuario = auth.usuarioActual();
+  if (!usuario || usuario === otro) return "";
+  const boton = (accion, texto, clase = "") =>
+    `<button class="btn chico ${clase}" data-amistad="${accion}" data-usuario="${escapar(otro)}">${texto}</button>`;
+  switch (amigos.estado(usuario, otro)) {
+    case "amigos": return boton("quitar", "✓ Amigos", "secundario");
+    case "enviada": return boton("cancelar", "Solicitud enviada · cancelar", "secundario");
+    case "recibida": return boton("aceptar", "Aceptar solicitud") + boton("rechazar", "Rechazar", "secundario");
+    default: return boton("pedir", "+ Agregar amigo");
+  }
+}
+
+function eventosAmistad() {
+  const usuario = auth.usuarioActual();
+  document.querySelectorAll("[data-amistad]").forEach((b) => {
+    b.onclick = () => {
+      const otro = b.dataset.usuario;
+      switch (b.dataset.amistad) {
+        case "pedir": amigos.pedir(usuario, otro); break;
+        case "aceptar": amigos.aceptar(usuario, otro); break;
+        case "quitar":
+          if (!confirm(`¿Quitar a ${otro} de tus amigos?`)) return;
+          amigos.quitar(usuario, otro);
+          break;
+        default: amigos.quitar(usuario, otro); // cancelar o rechazar
+      }
+      renderZonaUsuario();
+      recargar();
+    };
+  });
+}
+
+// Recomendaciones y "similares" de TMDB juntas, las más conocidas primero
+// (la obra se pide con append_to_response: "recommendations,similar")
+function seccionSimilares(obra) {
+  const todas = [...(obra.recommendations?.results ?? []), ...(obra.similar?.results ?? [])];
+  const lista = [...new Map(todas.map((o) => [o.id, o])).values()]
+    .filter((o) => o.poster_path && o.id !== obra.id)
+    .sort((a, b) => b.vote_count - a.vote_count)
+    .slice(0, 15);
+  return lista.length ? `
+    <section class="seccion" style="margin-top:32px">
+      <h2>Similares</h2>
+      ${carrusel(lista, lista.length, "")}
+    </section>` : "";
 }
 
 // Links a las páginas de personas: [{ id, name }] → "Fulano, Mengano" (sin repetir)
@@ -813,6 +1220,8 @@ function renderMenu() {
     <a href="#/catalogo">Catálogo</a>
     <a href="#/series">Series</a>
     <a href="#/tags">Tags</a>
+    <a href="#/musica">Música</a>
+    <a href="#/comunidad">Comunidad</a>
     ${auth.esAdmin() ? `<a href="#/admin">⚙ Admin</a>` : ""}`;
 }
 
@@ -821,8 +1230,12 @@ function renderZonaUsuario() {
   const zona = document.getElementById("zona-usuario");
   const usuario = auth.usuarioActual();
   if (usuario) {
+    const solicitudes = amigos.recibidas(usuario).length;
     zona.innerHTML = `
-      <a href="#/perfil">👤 ${escapar(usuario)}${auth.esAdmin() ? ` <span class="insignia">admin</span>` : ""}</a>
+      <a class="link-usuario" href="#/usuario/${encodeURIComponent(usuario)}">
+        ${avatar(usuario)}${escapar(usuario)}${auth.esAdmin() ? ` <span class="insignia">admin</span>` : ""}
+        ${solicitudes ? `<span class="contador" title="Solicitudes de amistad">${solicitudes}</span>` : ""}
+      </a>
       <button class="btn secundario chico" id="btn-salir">Salir</button>`;
     document.getElementById("btn-salir").onclick = () => {
       auth.salir();
@@ -888,7 +1301,7 @@ async function vistaPelicula(id) {
   if (!hayCredenciales()) return avisoSinCredenciales();
   id = Number(id);
 
-  const peli = await tmdb(`/movie/${id}`, { append_to_response: "credits,videos" });
+  const peli = await tmdb(`/movie/${id}`, { append_to_response: "credits,videos,recommendations,similar" });
   const trailer = await buscarTrailer(peli.videos.results, `/movie/${id}/videos`);
 
   const director = peli.credits.crew.find((c) => c.job === "Director");
@@ -926,7 +1339,8 @@ async function vistaPelicula(id) {
 
     ${seccionTrailer(trailer)}
     ${seccionReparto(peli.credits.cast)}
-    ${seccionComentarios(id, peli.title)}`;
+    ${seccionSimilares(peli)}
+    ${seccionResenas(id, peli.title)}`;
 }
 
 // La película o serie que se está viendo: { clave (del catálogo), titulo, tipo }
@@ -986,29 +1400,72 @@ function eventosTagsCatalogo() {
   };
 }
 
-// Estrellas y comentarios de una película, serie o episodio (después de renderizar)
+// Estrellas, reseñas y comentarios de una película, serie o episodio (después de renderizar)
 function eventosOpiniones(clave) {
+  eventosLikes();
   const usuario = auth.usuarioActual();
   if (!usuario) return;
 
   document.querySelectorAll("#mi-rating button").forEach((b) => {
     b.onclick = () => {
       ratings.poner(clave, usuario, Number(b.dataset.valor));
+      resenas.actualizarPuntaje(clave, usuario, Number(b.dataset.valor));
       recargar();
     };
   });
 
   const quitarRating = document.getElementById("btn-quitar-rating");
-  if (quitarRating) quitarRating.onclick = () => { ratings.quitar(clave, usuario); recargar(); };
-
-  document.getElementById("form-comentario").onsubmit = (e) => {
-    e.preventDefault();
-    const texto = e.target.texto.value.trim();
-    if (!texto) return;
-    comentarios.agregar(clave, usuario, texto);
+  if (quitarRating) quitarRating.onclick = () => {
+    // Una reseña no puede quedar sin puntaje
+    if (resenas.de(clave, usuario)) {
+      if (!confirm("Tu reseña usa esta puntuación. ¿Borrar la puntuación y la reseña?")) return;
+      resenas.borrar(clave, usuario);
+    }
+    ratings.quitar(clave, usuario);
     recargar();
   };
 
+  const form = document.getElementById("form-resena");
+  if (form) {
+    const error = document.getElementById("error-resena");
+    form.querySelectorAll("#estrellas-resena button").forEach((b) => {
+      b.onclick = () => {
+        form.elements.puntaje.value = b.dataset.valor;
+        form.querySelectorAll("#estrellas-resena button").forEach((x) =>
+          x.classList.toggle("activa", Number(x.dataset.valor) <= Number(b.dataset.valor)));
+        error.textContent = "";
+      };
+    });
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const puntaje = Number(form.elements.puntaje.value);
+      const texto = form.elements.texto.value.trim();
+      if (!puntaje) return (error.textContent = "Elegí una puntuación de 1 a 5 estrellas.");
+      if (texto.length < 10) return (error.textContent = "La reseña tiene que tener al menos 10 caracteres.");
+      resenas.guardar(clave, usuario, { texto, puntaje, spoiler: form.elements.spoiler.checked });
+      editandoResena = false;
+      recargar();
+    };
+
+    const cancelar = document.getElementById("cancelar-resena");
+    if (cancelar) cancelar.onclick = () => { editandoResena = false; recargar(); };
+  }
+
+  const editar = document.querySelector("[data-editar-resena]");
+  if (editar) editar.onclick = () => { editandoResena = true; recargar(); };
+
+  const borrar = document.querySelector("[data-borrar-resena]");
+  if (borrar) borrar.onclick = () => {
+    if (!confirm("¿Borrar tu reseña? Tu puntuación se mantiene.")) return;
+    resenas.borrar(clave, usuario);
+    recargar();
+  };
+
+  const orden = document.getElementById("orden-resenas");
+  if (orden) orden.onchange = () => { store.guardar("orden_resenas", orden.value); recargar(); };
+
+  // Comentarios de antes de las reseñas
   document.querySelectorAll("[data-borrar]").forEach((b) => {
     b.onclick = () => {
       if (confirm("¿Borrar este comentario?")) {
@@ -1023,6 +1480,7 @@ function eventosOpiniones(clave) {
 function eventosPelicula(id) {
   eventosOpiniones(Number(id));
   eventosTagsCatalogo();
+  eventosCarruseles();
 }
 
 function datalistTags() {
@@ -1221,7 +1679,7 @@ async function vistaSerie(id) {
   if (!hayCredenciales()) return avisoSinCredenciales();
   id = Number(id);
 
-  const serie = await tmdb(`/tv/${id}`, { append_to_response: "aggregate_credits,videos" });
+  const serie = await tmdb(`/tv/${id}`, { append_to_response: "aggregate_credits,videos,recommendations,similar" });
   const trailer = await buscarTrailer(serie.videos.results, `/tv/${id}/videos`);
   const enCatalogo = await catalogo.buscar(claveCatalogo("serie", id));
   obraActual = { clave: claveCatalogo("serie", id), titulo: serie.name, tipo: "serie" };
@@ -1305,12 +1763,14 @@ async function vistaSerie(id) {
 
     ${seccionTrailer(trailer)}
     ${seccionReparto(reparto)}
-    ${seccionComentarios(claveSerie(id), serie.name)}`;
+    ${seccionSimilares(serie)}
+    ${seccionResenas(claveSerie(id), serie.name)}`;
 }
 
 function eventosSerie(id) {
   eventosOpiniones(claveSerie(id));
   eventosTagsCatalogo();
+  eventosCarruseles();
 }
 
 let temporadaActual = null;
@@ -1486,7 +1946,7 @@ async function vistaEpisodio(id, temporada, episodio) {
     </div>
 
     ${ep.guest_stars.length ? seccionReparto(ep.guest_stars, "Invitados") : ""}
-    ${seccionComentarios(claveEpisodio(id, temporada, episodio), titulo)}`;
+    ${seccionResenas(claveEpisodio(id, temporada, episodio), titulo)}`;
 }
 
 function eventosEpisodio(id, temporada, episodio) {
@@ -1723,6 +2183,335 @@ async function vistaPersona(id) {
         <h2>Detrás de cámara <span class="suave" style="font-size:1rem">${equipo.length}</span></h2>
         ${filmografia(equipo, (c) => escapar(c.roles.join(", ")))}
       </section>` : ""}`;
+}
+
+// ---------- Música (MusicBrainz) ----------
+// Ranking de discos según los puntajes del sitio. Con pocos votos, el promedio se acerca
+// a la media general (así un disco con un solo 5 no le gana a uno con veinte 4,5).
+function rankingDiscos(decada = "") {
+  const meta = discos.todos();
+  const filas = Object.entries(store.leer("ratings", {}))
+    .filter(([clave]) => clave.startsWith("album-"))
+    .map(([clave, porUsuario]) => {
+      const valores = Object.values(porUsuario);
+      const mbid = clave.slice("album-".length);
+      if (!valores.length || !meta[mbid]) return null;
+      return { mbid, disco: meta[mbid], votos: valores.length, promedio: valores.reduce((a, b) => a + b, 0) / valores.length };
+    })
+    .filter(Boolean);
+  const media = filas.length ? filas.reduce((suma, f) => suma + f.promedio, 0) / filas.length : 3;
+  return filas
+    .filter((f) => !decada || f.disco.anio?.slice(0, 3) === decada.slice(0, 3))
+    .map((f) => ({ ...f, puntaje: (f.promedio * f.votos + media * 2) / (f.votos + 2) }))
+    .sort((a, b) => b.puntaje - a.puntaje || b.votos - a.votos);
+}
+
+function tablaRanking(filas) {
+  return `
+    <ol class="ranking">
+      ${filas.map((f, i) => `
+        <li>
+          <span class="puesto">${i + 1}</span>
+          <a class="mini-tapa" href="#/album/${f.mbid}">${tapa(f.mbid, f.disco.titulo)}</a>
+          <div class="crece">
+            <a class="titulo-disco" href="#/album/${f.mbid}">${escapar(f.disco.titulo)}</a>
+            <div class="suave">
+              ${f.disco.artistas.map((a) => `<a class="link-persona" href="#/artista/${a.id}">${escapar(a.nombre)}</a>${escapar(a.union)}`).join("")}
+              · ${f.disco.anio ?? "s/f"} · ${escapar(f.disco.tipo)}
+            </div>
+          </div>
+          <div class="nota-ranking">
+            <strong>${f.promedio.toFixed(2)}</strong>
+            <span>${f.votos} ${f.votos === 1 ? "voto" : "votos"}</span>
+          </div>
+        </li>`).join("")}
+    </ol>`;
+}
+
+function formBusquedaMusica(q = "") {
+  return `
+    <form id="form-buscar-musica" class="fila-form">
+      <input type="search" name="q" placeholder="Buscar artistas o discos…" value="${escapar(q)}" required autocomplete="off">
+      <button class="btn">Buscar</button>
+    </form>`;
+}
+
+function eventosBusquedaMusica() {
+  const form = document.getElementById("form-buscar-musica");
+  if (!form) return;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const q = form.elements.q.value.trim();
+    if (q) location.hash = `#/musica/buscar/${encodeURIComponent(q)}`;
+  };
+}
+
+async function vistaMusica() {
+  const ranking = rankingDiscos().slice(0, 10);
+  const ultimas = resenas.todas().filter((r) => r.clave.startsWith("album-")).slice(0, 6);
+  const obras = await obrasDeClaves(ultimas.map((r) => r.clave));
+  document.title = `Música · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion panel">
+      <h1 style="margin-top:0">🎵 Música</h1>
+      <p class="suave">Buscá artistas y discos en MusicBrainz, puntualos y escribí reseñas.</p>
+      ${formBusquedaMusica()}
+    </section>
+
+    <section class="seccion">
+      <h2>Charts del sitio ${ranking.length ? `<a href="#/musica/charts">Ver todos →</a>` : ""}</h2>
+      ${ranking.length
+        ? tablaRanking(ranking)
+        : `<p class="suave">Todavía nadie puntuó discos. Buscá uno y sé el primero.</p>`}
+    </section>
+
+    <section class="seccion">
+      <h2>Reseñas recientes de discos</h2>
+      <div class="resenas">
+        ${ultimas.map((r) => tarjetaResena(r, { obra: obras[r.clave] })).join("")
+          || `<p class="suave">Todavía no hay reseñas de discos.</p>`}
+      </div>
+    </section>`;
+}
+
+function eventosMusica() {
+  eventosBusquedaMusica();
+  eventosLikes();
+}
+
+const TIPOS_ARTISTA = {
+  Person: "Solista",
+  Group: "Grupo",
+  Orchestra: "Orquesta",
+  Choir: "Coro",
+  Character: "Personaje",
+  Other: "Otro",
+};
+
+function anios(lapso) {
+  if (!lapso?.begin) return "";
+  const desde = lapso.begin.slice(0, 4);
+  if (lapso.end) return `${desde}–${lapso.end.slice(0, 4)}`;
+  return lapso.ended ? desde : `${desde}–presente`;
+}
+
+async function vistaBusquedaMusica(q) {
+  q = decodeURIComponent(q);
+  const [{ artists }, gruposEncontrados] = await Promise.all([
+    musicbrainz("/artist", { query: q, limit: 8 }),
+    musicbrainz("/release-group", { query: q, limit: 24 }),
+  ]);
+  const albumes = gruposEncontrados["release-groups"];
+  document.title = `Buscar "${q}" en música · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion">
+      ${formBusquedaMusica(q)}
+    </section>
+    <section class="seccion">
+      <h2>Resultados para "${escapar(q)}"</h2>
+      ${artists.length ? `
+        <h3 class="titulo-genero">Artistas <span class="suave">(${artists.length})</span></h3>
+        <div class="lista-admin">
+          ${artists.map((a) => `
+            <a class="fila-admin" href="#/artista/${a.id}">
+              <strong class="crece">${escapar(a.name)}
+                ${a.disambiguation ? `<span class="suave" style="font-weight:400">(${escapar(a.disambiguation)})</span>` : ""}
+              </strong>
+              <span class="suave">${[TIPOS_ARTISTA[a.type] ?? a.type, a.area?.name ?? a.country, anios(a["life-span"])]
+                .filter(Boolean).map(escapar).join(" · ")}</span>
+            </a>`).join("")}
+        </div>` : ""}
+      ${albumes.length ? `
+        <h3 class="titulo-genero">Discos <span class="suave">(${albumes.length})</span></h3>
+        <div class="grilla">
+          ${albumes.map((rg) => tarjetaDisco(rg.id, {
+            titulo: rg.title,
+            artistas: (rg["artist-credit"] ?? []).map((c) => c.name + (c.joinphrase ?? "")).join(""),
+            anio: rg["first-release-date"]?.slice(0, 4),
+            tipo: tipoDisco(rg),
+          })).join("")}
+        </div>` : ""}
+      ${artists.length || albumes.length ? "" : `<p class="suave">No se encontraron artistas ni discos.</p>`}
+    </section>`;
+}
+
+// Secciones de la discografía; cada disco va en la primera que le corresponde
+const SECCIONES_DISCOGRAFIA = [
+  ["Álbumes", (rg, sec) => rg["primary-type"] === "Album" && !sec.length],
+  ["EPs", (rg, sec) => rg["primary-type"] === "EP" && !sec.length],
+  ["En vivo", (rg, sec) => sec.includes("Live")],
+  ["Compilados", (rg, sec) => sec.includes("Compilation")],
+  ["Otros", () => true],
+];
+
+async function vistaArtista(mbid) {
+  const artista = await musicbrainz(`/artist/${mbid}`, { inc: "genres+tags+url-rels" });
+  const wikidataId = artista.relations?.find((r) => r.type === "wikidata")?.url.resource.split("/").pop();
+  const [discografia, wiki] = await Promise.all([
+    musicbrainz("/release-group", { artist: mbid, type: "album|ep", limit: 100 }),
+    wikidataId ? datosWiki(wikidataId).catch(() => null) : null,
+  ]);
+
+  const grupos = [...discografia["release-groups"]]
+    .sort((a, b) => (a["first-release-date"] || "9999").localeCompare(b["first-release-date"] || "9999"));
+  const secciones = SECCIONES_DISCOGRAFIA.map(([titulo]) => ({ titulo, discos: [] }));
+  for (const rg of grupos) {
+    const sec = rg["secondary-types"] ?? [];
+    secciones[SECCIONES_DISCOGRAFIA.findIndex(([, corresponde]) => corresponde(rg, sec))].discos.push(rg);
+  }
+
+  // Promedio del sitio con todos los puntajes de sus discos
+  const puntajes = grupos.flatMap((rg) => Object.values(ratings.dePelicula(claveDisco(rg.id))));
+  const promedio = puntajes.length ? puntajes.reduce((a, b) => a + b, 0) / puntajes.length : null;
+  const generos = (artista.genres?.length ? artista.genres : artista.tags ?? [])
+    .sort((a, b) => b.count - a.count).slice(0, 8);
+  const premios = wiki?.premios?.ganados ?? [];
+  document.title = `${artista.name} · El "Santi"-Grial`;
+
+  return `
+    <div class="detalle persona">
+      ${wiki?.imagen
+        ? `<img class="poster" src="${wiki.imagen}" alt="${escapar(artista.name)}">`
+        : `<div class="sin-poster">${escapar(artista.name)}</div>`}
+      <div>
+        <h1>${escapar(artista.name)}</h1>
+        ${artista.disambiguation ? `<p class="eslogan">${escapar(artista.disambiguation)}</p>` : ""}
+        <div class="datos">
+          ${artista.type ? `<span>${escapar(TIPOS_ARTISTA[artista.type] ?? artista.type)}</span>` : ""}
+          ${artista.area ? `<span>📍 ${escapar(artista.area.name)}</span>` : ""}
+          ${anios(artista["life-span"]) ? `<span>📅 ${anios(artista["life-span"])}</span>` : ""}
+        </div>
+        <div class="tags">${generos.map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}</div>
+        <div class="puntajes">
+          <div class="puntaje"><div class="valor">${grupos.length}</div><div class="etiqueta">Discos y EPs</div></div>
+          <div class="puntaje">
+            <div class="valor">${promedio ? promedio.toFixed(1) : "–"}<small>/5</small></div>
+            <div class="etiqueta">El "Santi"-Grial · ${puntajes.length} votos</div>
+          </div>
+          ${premios.length ? `<div class="puntaje"><div class="valor">${premios.length}</div><div class="etiqueta">Premios</div></div>` : ""}
+        </div>
+        <div class="tags">
+          ${wiki?.url ? `<a class="tag" href="${wiki.url}" target="_blank" rel="noopener">Wikipedia ↗</a>` : ""}
+          <a class="tag" href="https://musicbrainz.org/artist/${mbid}" target="_blank" rel="noopener">MusicBrainz ↗</a>
+        </div>
+      </div>
+    </div>
+
+    ${seccionBiografia({ biography: "" }, wiki)}
+
+    <section class="seccion">
+      <h2>Discografía</h2>
+      ${secciones.filter((s) => s.discos.length).map((s) => `
+        <h3 class="titulo-genero">${s.titulo} <span class="suave">(${s.discos.length})</span></h3>
+        <div class="grilla">
+          ${s.discos.map((rg) => tarjetaDisco(rg.id, {
+            titulo: rg.title,
+            anio: rg["first-release-date"]?.slice(0, 4),
+            tipo: s.titulo === "Otros" ? tipoDisco(rg) : "",
+          })).join("")}
+        </div>`).join("") || `<p class="suave">MusicBrainz no tiene discos de este artista.</p>`}
+      ${discografia["release-group-count"] > grupos.length
+        ? `<p class="suave nota">Se muestran ${grupos.length} de ${discografia["release-group-count"]}.
+             <a href="https://musicbrainz.org/artist/${mbid}" target="_blank" rel="noopener" style="color:var(--acento)">Ver todo en MusicBrainz ↗</a></p>`
+        : ""}
+    </section>
+
+    ${premios.length ? `
+      <section class="seccion">
+        <h2>Premios</h2>
+        ${listaPremios(premios)}
+        <p class="fuente">Fuente: <a href="https://www.wikidata.org/wiki/${wikidataId}" target="_blank" rel="noopener">Wikidata</a></p>
+      </section>` : ""}`;
+}
+
+async function vistaAlbum(mbid) {
+  const rg = await musicbrainz(`/release-group/${mbid}`, { inc: "artist-credits+releases+genres+tags+ratings" });
+  discos.recordar(rg);
+  // Los temas salen de la primera edición oficial
+  const edicion = rg.releases
+    .filter((r) => r.status === "Official")
+    .sort((a, b) => (a.date || "9999").localeCompare(b.date || "9999"))[0] ?? rg.releases[0];
+  const release = edicion ? await musicbrainz(`/release/${edicion.id}`, { inc: "recordings" }).catch(() => null) : null;
+
+  const medios = release?.media ?? [];
+  const temas = medios.flatMap((m) => m.tracks ?? []);
+  const total = temas.reduce((suma, t) => suma + (t.length ?? 0), 0);
+  const generos = (rg.genres?.length ? rg.genres : rg.tags ?? []).sort((a, b) => b.count - a.count).slice(0, 6);
+  const fecha = rg["first-release-date"];
+  document.title = `${rg.title} · El "Santi"-Grial`;
+
+  return `
+    <div class="detalle disco">
+      ${tapa(mbid, rg.title, 500)}
+      <div>
+        <h1>${escapar(rg.title)}</h1>
+        <p class="artistas-disco">${creditoArtistas(rg["artist-credit"])}</p>
+        <div class="datos">
+          <span>${escapar(tipoDisco(rg))}</span>
+          ${fecha ? `<span>📅 ${fecha.length === 10 ? formatearDia(fecha) : fecha.slice(0, 4)}</span>` : ""}
+          ${temas.length ? `<span>${temas.length} temas</span>` : ""}
+          ${total ? `<span>⏱ ${Math.round(total / 60000)} min</span>` : ""}
+          ${rg.releases.length > 1 ? `<span>${rg.releases.length} ediciones</span>` : ""}
+        </div>
+        <div class="tags">${generos.map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}</div>
+        ${bloquePuntajes(claveDisco(mbid), rg.rating?.value, rg.rating?.["votes-count"], { nombre: "MusicBrainz", maximo: 5 })}
+        <div class="tags">
+          <a class="tag" href="https://musicbrainz.org/release-group/${mbid}" target="_blank" rel="noopener">MusicBrainz ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <section class="seccion" style="margin-top:32px">
+      <h2>Lista de temas</h2>
+      ${medios.length ? medios.map((m) => `
+        ${medios.length > 1 ? `<h3 class="titulo-genero">${escapar(m.format ?? "Disco")} ${m.position}${m.title ? ` · ${escapar(m.title)}` : ""}</h3>` : ""}
+        <ol class="temas">
+          ${(m.tracks ?? []).map((t) => `
+            <li>
+              <span class="numero">${escapar(t.number)}</span>
+              <span class="crece">${escapar(t.title)}</span>
+              <span class="suave">${duracion(t.length)}</span>
+            </li>`).join("")}
+        </ol>`).join("") : `<p class="suave">MusicBrainz no tiene la lista de temas de este disco.</p>`}
+      ${edicion ? `<p class="fuente">Edición: ${escapar(edicion.date ?? "s/f")}${edicion.country ? ` · ${escapar(edicion.country)}` : ""}</p>` : ""}
+    </section>
+
+    ${seccionResenas(claveDisco(mbid), rg.title)}`;
+}
+
+function eventosAlbum(mbid) {
+  eventosOpiniones(claveDisco(mbid));
+}
+
+async function vistaCharts(decada = "") {
+  const ranking = rankingDiscos(decada);
+  const decadas = [...new Set(Object.values(discos.todos()).map((d) => d.anio?.slice(0, 3)).filter(Boolean))]
+    .sort().reverse().map((d) => `${d}0`);
+  document.title = `Charts · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion">
+      <h2>Charts del sitio ${decada ? `<span class="suave" style="font-size:1rem">años ${decada.slice(2)}</span>` : ""}</h2>
+      <div class="controles">
+        <label>Década
+          <select id="decada-charts">
+            <option value="">Todas</option>
+            ${decadas.map((d) => `<option value="${d}" ${d === decada ? "selected" : ""}>${d}s</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <p class="suave nota">Ordenados por promedio ponderado: con pocos votos, el puntaje se acerca a la media del sitio.</p>
+      ${ranking.length ? tablaRanking(ranking.slice(0, 100)) : `<p class="suave">No hay discos puntuados${decada ? " de esa década" : ""}.</p>`}
+    </section>`;
+}
+
+function eventosCharts() {
+  const decada = document.getElementById("decada-charts");
+  if (decada) decada.onchange = () => {
+    location.hash = decada.value ? `#/musica/charts/${decada.value}` : "#/musica/charts";
+  };
 }
 
 // ---------- Panel de administración ----------
@@ -2006,6 +2795,8 @@ async function vistaBusqueda(q) {
       ${results.length
         ? grupo("Personas", personas, tarjetaPersona) + grupo("Películas", pelis) + grupo("Series", series)
         : `<p class="suave">No se encontraron películas, series ni personas.</p>`}
+      <p class="aviso">¿Buscabas música?
+        <a href="#/musica/buscar/${encodeURIComponent(q)}" style="color:var(--acento)">Buscar "${escapar(q)}" en Música →</a></p>
     </section>`;
 }
 
@@ -2073,80 +2864,232 @@ function eventosLogin() {
   };
 }
 
-// Título, link y tarjeta de una película, serie o episodio a partir de su clave de ratings/comentarios
+// Título, link, imagen y tarjeta de una película, serie, episodio o disco a partir de su clave de ratings/reseñas
 async function obraDeClave(clave) {
-  const episodio = clave.match(/^serie-(\d+)-(\d+)x(\d+)$/);
+  const poster = (ruta) => (ruta ? `${IMG}w92${ruta}` : null);
+
+  const album = clave.match(/^album-([0-9a-f-]{36})$/);
+  if (album) {
+    const mbid = album[1];
+    let disco = discos.de(mbid);
+    if (!disco) {
+      const rg = await musicbrainz(`/release-group/${mbid}`, { inc: "artist-credits" });
+      discos.recordar(rg);
+      disco = discos.de(mbid);
+    }
+    return {
+      titulo: `${disco.titulo} · ${nombreArtistas(disco)}`,
+      href: `#/album/${mbid}`,
+      imagen: tapaDe(mbid),
+      tarjeta: tarjetaDisco(mbid, { ...disco, artistas: nombreArtistas(disco) }),
+    };
+  }
+
+  const episodio = clave.match(/^serie-(d+)-(d+)x(d+)$/);
   if (episodio) {
     const [, id, t, e] = episodio.map(Number);
     const [serie, ep] = await Promise.all([tmdb(`/tv/${id}`), tmdb(`/tv/${id}/season/${t}/episode/${e}`)]);
     const titulo = `${serie.name} · ${codigoEpisodio(t, e)} ${ep.name}`;
     const href = rutaEpisodio(id, t, e);
-    return { titulo, href, tarjeta: tarjeta({ ...serie, name: titulo, vote_average: ep.vote_average }, href) };
+    return {
+      titulo, href, imagen: poster(serie.poster_path),
+      tarjeta: tarjeta({ ...serie, name: titulo, vote_average: ep.vote_average }, href),
+    };
   }
 
-  const serie = clave.match(/^serie-(\d+)$/);
+  const serie = clave.match(/^serie-(d+)$/);
   if (serie) {
     const datos = await tmdb(`/tv/${serie[1]}`);
-    return { titulo: datos.name, href: `#/serie/${datos.id}`, tarjeta: tarjeta(datos) };
+    return { titulo: datos.name, href: `#/serie/${datos.id}`, imagen: poster(datos.poster_path), tarjeta: tarjeta(datos) };
   }
 
   const peli = await tmdb(`/movie/${clave}`);
-  return { titulo: peli.title, href: `#/pelicula/${peli.id}`, tarjeta: tarjeta(peli) };
+  return { titulo: peli.title, href: `#/pelicula/${peli.id}`, imagen: poster(peli.poster_path), tarjeta: tarjeta(peli) };
 }
 
-async function vistaPerfil() {
+// { [clave]: obra } para varias claves a la vez (las que fallan quedan con datos genéricos)
+async function obrasDeClaves(claves) {
+  const unicas = [...new Set(claves)];
+  return Object.fromEntries(await Promise.all(unicas.map(async (clave) => [
+    clave,
+    await obraDeClave(clave).catch(() => ({ titulo: "Sin datos", href: "#/", imagen: null, tarjeta: "" })),
+  ])));
+}
+
+// #/perfil lleva al perfil propio
+function vistaPerfil() {
   const usuario = auth.usuarioActual();
-  if (!usuario) {
-    location.hash = "#/login";
-    return "";
-  }
+  location.hash = usuario ? `#/usuario/${encodeURIComponent(usuario)}` : "#/login";
+  return "";
+}
+
+async function vistaUsuario(nombre) {
   if (!hayCredenciales()) return avisoSinCredenciales();
+  const registro = buscarUsuario(decodeURIComponent(nombre));
+  if (!registro) return `<div class="aviso error">No existe el usuario "${escapar(decodeURIComponent(nombre))}".</div>`;
+  nombre = registro.usuario;
 
-  const todosRatings = store.leer("ratings", {});
-  const misRatings = Object.entries(todosRatings)
-    .filter(([, r]) => r[usuario])
-    .map(([clave, r]) => ({ clave, valor: r[usuario] }));
-
-  const todosComentarios = store.leer("comentarios", {});
-  const misComentarios = Object.entries(todosComentarios)
-    .flatMap(([clave, lista]) => lista.filter((c) => c.autor === usuario).map((c) => ({ ...c, clave })))
+  const usuario = auth.usuarioActual();
+  const propio = usuario === nombre;
+  const susResenas = resenas.deUsuario(nombre);
+  const conResena = new Set(susResenas.map((r) => r.clave));
+  const susPuntajes = Object.entries(store.leer("ratings", {}))
+    .filter(([, r]) => r[nombre])
+    .map(([clave, r]) => ({ clave, valor: r[nombre] }));
+  // Las puntuaciones que ya tienen reseña se ven en la reseña
+  const soloPuntajes = susPuntajes.filter((p) => !conResena.has(p.clave));
+  const susComentarios = Object.entries(store.leer("comentarios", {}))
+    .flatMap(([clave, lista]) => lista.filter((c) => c.autor === nombre).map((c) => ({ ...c, clave })))
     .sort((a, b) => b.fecha.localeCompare(a.fecha));
+  const susAmigos = amigos.de(nombre);
+  const obras = await obrasDeClaves([...susResenas, ...soloPuntajes, ...susComentarios].map((x) => x.clave));
+  const promedio = susPuntajes.length
+    ? susPuntajes.reduce((suma, p) => suma + p.valor, 0) / susPuntajes.length
+    : null;
+  document.title = `${nombre} · El "Santi"-Grial`;
 
-  const claves = [...new Set([...misRatings.map((r) => r.clave), ...misComentarios.map((c) => c.clave)])];
-  const obras = Object.fromEntries(
-    await Promise.all(claves.map(async (clave) => [clave, await obraDeClave(clave).catch(() => null)])),
-  );
-  document.title = `${usuario} · El "Santi"-Grial`;
+  const recibidas = propio ? amigos.recibidas(nombre) : [];
+  const enviadas = propio ? amigos.enviadas(nombre) : [];
 
   return `
-    <section class="seccion">
-      <h2>👤 ${escapar(usuario)}</h2>
-    </section>
-    <section class="seccion">
-      <h2>Mis puntuaciones (${misRatings.length})</h2>
-      ${misRatings.length
-        ? `<div class="grilla">${misRatings.filter((r) => obras[r.clave]).map((r) => `
-            <div>
-              ${obras[r.clave].tarjeta}
-              <div style="margin-top:6px">${estrellas(r.valor, false)}</div>
-            </div>`).join("")}</div>`
-        : `<p class="suave">Todavía no puntuaste nada.</p>`}
-    </section>
-    <section class="seccion">
-      <h2>Mis comentarios (${misComentarios.length})</h2>
-      <div class="comentarios">
-        ${misComentarios.map((c) => `
-          <div class="comentario">
-            <div class="cabecera">
-              ${obras[c.clave]
-                ? `<a class="autor" href="${obras[c.clave].href}">${escapar(obras[c.clave].titulo)}</a>`
-                : `<span class="autor">Sin datos</span>`}
-              <span class="fecha">${formatearFecha(c.fecha)}</span>
-            </div>
-            <p>${escapar(c.texto)}</p>
-          </div>`).join("") || `<p class="suave">Todavía no comentaste nada.</p>`}
+    <div class="cabecera-perfil">
+      ${avatar(nombre, true)}
+      <div class="crece">
+        <h1>${escapar(nombre)} ${USUARIOS.some((u) => u.usuario === nombre && u.rol === "admin") ? `<span class="insignia">admin</span>` : ""}</h1>
+        <div class="puntajes">
+          <div class="puntaje"><div class="valor">${susResenas.length}</div><div class="etiqueta">Reseñas</div></div>
+          <div class="puntaje"><div class="valor">${susPuntajes.length}</div><div class="etiqueta">Puntuaciones</div></div>
+          <div class="puntaje"><div class="valor">${promedio ? promedio.toFixed(1) : "–"}<small>/5</small></div><div class="etiqueta">Puntaje promedio</div></div>
+          <div class="puntaje"><div class="valor">${susAmigos.length}</div><div class="etiqueta">Amigos</div></div>
+        </div>
       </div>
+      <div class="fila-form">${botonAmistad(nombre)}</div>
+    </div>
+
+    ${recibidas.length || enviadas.length ? `
+      <section class="seccion panel">
+        <h2>Solicitudes de amistad</h2>
+        <div class="lista-admin">
+          ${recibidas.map((otro) => `
+            <div class="fila-admin">
+              <span class="crece">${linkUsuario(otro)} <span class="suave">quiere ser tu amigo</span></span>
+              ${botonAmistad(otro)}
+            </div>`).join("")}
+          ${enviadas.map((otro) => `
+            <div class="fila-admin">
+              <span class="crece">${linkUsuario(otro)} <span class="suave">todavía no respondió</span></span>
+              ${botonAmistad(otro)}
+            </div>`).join("")}
+        </div>
+      </section>` : ""}
+
+    <section class="seccion">
+      <h2>Reseñas (${susResenas.length})</h2>
+      <div class="resenas">
+        ${susResenas.map((r) => tarjetaResena(r, { obra: obras[r.clave], autor: false })).join("")
+          || `<p class="suave">${propio ? "Todavía no escribiste reseñas." : "Todavía no escribió reseñas."}</p>`}
+      </div>
+    </section>
+
+    ${soloPuntajes.length ? `
+      <section class="seccion">
+        <h2>Puntuaciones sin reseña (${soloPuntajes.length})</h2>
+        <div class="grilla">
+          ${soloPuntajes.map((p) => `
+            <div>
+              ${obras[p.clave].tarjeta}
+              <div style="margin-top:6px">${estrellas(p.valor, false)}</div>
+            </div>`).join("")}
+        </div>
+      </section>` : ""}
+
+    <section class="seccion">
+      <h2>Amigos (${susAmigos.length})</h2>
+      ${susAmigos.length
+        ? `<div class="lista-amigos">${susAmigos.map(linkUsuario).join("")}</div>`
+        : `<p class="suave">${propio
+          ? `Todavía no tenés amigos. Buscalos en <a href="#/comunidad" style="color:var(--acento)">Comunidad</a>.`
+          : "Todavía no tiene amigos."}</p>`}
+    </section>
+
+    ${susComentarios.length ? `
+      <section class="seccion">
+        <h2>Comentarios anteriores (${susComentarios.length})</h2>
+        <div class="comentarios">
+          ${susComentarios.map((c) => `
+            <div class="comentario">
+              <div class="cabecera">
+                <a class="autor" href="${obras[c.clave].href}">${escapar(obras[c.clave].titulo)}</a>
+                <span class="fecha">${formatearFecha(c.fecha)}</span>
+              </div>
+              <p>${escapar(c.texto)}</p>
+            </div>`).join("")}
+        </div>
+      </section>` : ""}`;
+}
+
+function eventosUsuario() {
+  eventosAmistad();
+  eventosLikes();
+}
+
+async function vistaComunidad() {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  const usuario = auth.usuarioActual();
+  const misAmigos = new Set(usuario ? amigos.de(usuario) : []);
+  const todas = resenas.todas();
+  const deAmigos = todas.filter((r) => misAmigos.has(r.autor));
+  const recientes = (deAmigos.length ? deAmigos : todas).slice(0, 8);
+  const obras = await obrasDeClaves(recientes.map((r) => r.clave));
+
+  const cantidadResenas = {};
+  todas.forEach((r) => { cantidadResenas[r.autor] = (cantidadResenas[r.autor] ?? 0) + 1; });
+  // Primero los amigos, después el resto
+  const nombres = todosLosUsuarios().sort((a, b) => misAmigos.has(b) - misAmigos.has(a));
+  document.title = `Comunidad · El "Santi"-Grial`;
+
+  return `
+    <h1>Comunidad</h1>
+    <section class="seccion">
+      <h2>${deAmigos.length ? "Lo último de tus amigos" : "Reseñas recientes"}</h2>
+      <div class="resenas">
+        ${recientes.map((r) => tarjetaResena(r, { obra: obras[r.clave] })).join("")
+          || `<p class="suave">Todavía nadie escribió reseñas.</p>`}
+      </div>
+    </section>
+
+    <section class="seccion">
+      <h2>Usuarios <span class="suave" style="font-size:1rem">${nombres.length}</span></h2>
+      <div class="fila-form">
+        <input type="search" id="buscar-usuarios" placeholder="Buscar usuarios…" autocomplete="off">
+      </div>
+      <div class="lista-usuarios">
+        ${nombres.map((n) => `
+          <div class="fila-usuario" data-nombre="${escapar(n.toLowerCase())}">
+            ${linkUsuario(n)}
+            ${n === usuario ? `<span class="insignia">vos</span>` : ""}
+            <span class="suave crece">${cantidadResenas[n] ?? 0} reseñas · ${amigos.de(n).length} amigos</span>
+            ${botonAmistad(n)}
+          </div>`).join("")}
+      </div>
+      <p class="suave" id="sin-usuarios" hidden>No hay usuarios con ese nombre.</p>
     </section>`;
+}
+
+function eventosComunidad() {
+  eventosAmistad();
+  eventosLikes();
+  const buscar = document.getElementById("buscar-usuarios");
+  if (!buscar) return;
+  buscar.oninput = () => {
+    const texto = buscar.value.trim().toLowerCase();
+    let visibles = 0;
+    document.querySelectorAll(".fila-usuario").forEach((f) => {
+      f.hidden = !f.dataset.nombre.includes(texto);
+      if (!f.hidden) visibles++;
+    });
+    document.getElementById("sin-usuarios").hidden = visibles > 0;
+  };
 }
 
 function vistaNoEncontrada() {
@@ -2165,6 +3108,13 @@ const rutas = [
   { patron: /^\/?$/, vista: vistaInicio },
   { patron: /^\/login$/, vista: vistaLogin, despues: eventosLogin },
   { patron: /^\/perfil$/, vista: vistaPerfil },
+  { patron: /^\/usuario\/([^/]+)$/, vista: vistaUsuario, despues: eventosUsuario },
+  { patron: /^\/comunidad$/, vista: vistaComunidad, despues: eventosComunidad },
+  { patron: /^\/musica$/, vista: vistaMusica, despues: eventosMusica },
+  { patron: /^\/musica\/buscar\/(.+)$/, vista: vistaBusquedaMusica, despues: eventosBusquedaMusica },
+  { patron: /^\/musica\/charts(?:\/(\d{4}))?$/, vista: vistaCharts, despues: eventosCharts },
+  { patron: /^\/artista\/([0-9a-f-]{36})$/, vista: vistaArtista },
+  { patron: /^\/album\/([0-9a-f-]{36})$/, vista: vistaAlbum, despues: eventosAlbum },
   { patron: /^\/pelicula\/(\d+)$/, vista: vistaPelicula, despues: eventosPelicula },
   { patron: /^\/series$/, vista: vistaSeries },
   { patron: /^\/serie\/(\d+)$/, vista: vistaSerie, despues: eventosSerie },
@@ -2219,6 +3169,7 @@ document.getElementById("form-busqueda").onsubmit = (e) => {
 
 window.addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
+  editandoResena = false;
   router();
 });
 
