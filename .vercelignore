@@ -1,0 +1,4 @@
+# No se publica: tiene las contraseñas y en Vercel los datos van a Redis
+datos/guardados.json
+servidor.js
+.vscode/
