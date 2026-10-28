@@ -1,0 +1,13 @@
+{
+  "usuarios": [
+    {
+      "usuario": "perezelraton",
+      "clave": "1234"
+    }
+  ],
+  "tags_admin": {
+    "lautigod": {
+      "descripcion": "#swag #estanzuela"
+    }
+  }
+}

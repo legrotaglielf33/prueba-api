@@ -5,4 +5,5 @@
 const USUARIOS = [
   { usuario: "santiagod", clave: "1234",  rol: "admin" },
   { usuario: "admin",     clave: "admin", rol: "admin" },
+  { usuario: "perezelraton",     clave: "1234", rol: "admin" },
 ];
