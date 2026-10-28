@@ -9,7 +9,7 @@ const URL_REDIS = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_
 const TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
 // Las únicas claves que la página puede guardar
-const CLAVES = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos", "tags_musica"];
+const CLAVES = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos", "tags_musica", "colecciones", "juegos", "tags_juegos", "fotos"];
 const PREFIJO = "santi:";
 
 async function redis(...comando) {

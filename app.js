@@ -38,7 +38,7 @@ function yaSalio(fecha) {
 
 // Estas claves se guardan en el servidor (datos/guardados.json) y las ven todos.
 // El resto (sesión, búsquedas en caché, preferencias) queda en este navegador.
-const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos", "tags_musica"];
+const COMPARTIDAS = ["usuarios", "ratings", "comentarios", "tags_admin", "catalogo", "vistos", "resenas", "amigos", "discos", "tags_musica", "colecciones", "juegos", "tags_juegos", "fotos"];
 let datosServidor = {};
 
 const store = {
@@ -576,6 +576,109 @@ const amigos = {
   },
 };
 
+// ---------------------------------------------------------------
+//  Colecciones: listas de películas, series y discos que arma cada usuario.
+//  Cada elemento guarda su título, imagen y año para mostrarse sin pedir
+//  nada a TMDB ni a MusicBrainz.
+// ---------------------------------------------------------------
+const colecciones = {
+  // { [id]: { id, autor, titulo, descripcion, creada, editada, likes: [usuarios],
+  //           items: [{ clave, titulo, subtitulo, imagen, anio, nota }] } }
+  todas() {
+    return Object.values(store.leer("colecciones", {})).sort((a, b) => b.editada.localeCompare(a.editada));
+  },
+  de(id) {
+    return store.leer("colecciones", {})[id] ?? null;
+  },
+  deUsuario(usuario) {
+    return this.todas().filter((c) => c.autor === usuario);
+  },
+  // Aplica un cambio a una colección y la guarda con la fecha de edición
+  modificar(id, cambio) {
+    const todas = store.leer("colecciones", {});
+    if (!todas[id]) return;
+    cambio(todas[id]);
+    todas[id].editada = new Date().toISOString();
+    store.guardar("colecciones", todas);
+  },
+  crear(autor, titulo, descripcion = "") {
+    const todas = store.leer("colecciones", {});
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const ahora = new Date().toISOString();
+    todas[id] = { id, autor, titulo, descripcion, creada: ahora, editada: ahora, likes: [], items: [] };
+    store.guardar("colecciones", todas);
+    return id;
+  },
+  borrar(id) {
+    const todas = store.leer("colecciones", {});
+    delete todas[id];
+    store.guardar("colecciones", todas);
+  },
+  contiene(id, clave) {
+    return Boolean(this.de(id)?.items.some((i) => i.clave === clave));
+  },
+  agregarItem(id, item) {
+    if (this.contiene(id, item.clave)) return;
+    this.modificar(id, (c) => c.items.push({ ...item, nota: "" }));
+  },
+  quitarItem(id, clave) {
+    this.modificar(id, (c) => { c.items = c.items.filter((i) => i.clave !== clave); });
+  },
+  // delta: -1 sube el elemento un lugar, 1 lo baja
+  moverItem(id, clave, delta) {
+    this.modificar(id, (c) => {
+      const i = c.items.findIndex((x) => x.clave === clave);
+      const j = i + delta;
+      if (i < 0 || j < 0 || j >= c.items.length) return;
+      [c.items[i], c.items[j]] = [c.items[j], c.items[i]];
+    });
+  },
+  notaItem(id, clave, nota) {
+    this.modificar(id, (c) => {
+      const item = c.items.find((x) => x.clave === clave);
+      if (item) item.nota = nota;
+    });
+  },
+  alternarLike(id, usuario) {
+    // Un "me gusta" no cuenta como edición: no se cambia la fecha
+    const todas = store.leer("colecciones", {});
+    const c = todas[id];
+    if (!c) return;
+    c.likes = c.likes.includes(usuario) ? c.likes.filter((u) => u !== usuario) : [...c.likes, usuario];
+    store.guardar("colecciones", todas);
+  },
+};
+
+// "cine" (películas y series), "musica" o "juegos"
+function tipoDeClave(clave) {
+  if (clave.startsWith("album-")) return "musica";
+  if (clave.startsWith("juego-")) return "juegos";
+  return "cine";
+}
+
+// Si tiene cosas de más de un tipo, es mixta
+function tipoColeccion(items) {
+  const tipos = new Set(items.map((i) => tipoDeClave(i.clave)));
+  if (!tipos.size) return "vacia";
+  return tipos.size > 1 ? "mixta" : [...tipos][0];
+}
+
+const TIPOS_COLECCION = {
+  cine: "🎬 Películas y series",
+  musica: "🎵 Música",
+  juegos: "🎮 Juegos",
+  mixta: "🔀 Mixta",
+  vacia: "Vacía",
+};
+
+// Link a una película, serie, disco o juego a partir de su clave
+function rutaDeClave(clave) {
+  if (clave.startsWith("album-")) return `#/album/${clave.slice("album-".length)}`;
+  if (clave.startsWith("juego-")) return `#/juego/${clave.slice("juego-".length)}`;
+  if (clave.startsWith("serie-")) return `#/serie/${clave.slice("serie-".length)}`;
+  return `#/pelicula/${clave}`;
+}
+
 // Nombres de todas las cuentas (las de datos/usuarios.js y las creadas)
 function todosLosUsuarios() {
   return [...new Set([...USUARIOS, ...usuariosLocales()].map((u) => u.usuario))]
@@ -827,7 +930,7 @@ function bloquePuntajes(clave, votoExterno, votosExternos, fuente = { nombre: "T
     <div class="puntajes">
       <div class="puntaje">
         <div class="valor">${votoExterno ? votoExterno.toFixed(1) : "–"}<small>/${fuente.maximo}</small></div>
-        <div class="etiqueta">${fuente.nombre} · ${(votosExternos ?? 0).toLocaleString("es-AR")} votos</div>
+        <div class="etiqueta">${fuente.nombre}${votosExternos == null ? "" : ` · ${votosExternos.toLocaleString("es-AR")} votos`}</div>
       </div>
       <div class="puntaje">
         <div class="valor">${promedio ? promedio.valor.toFixed(1) : "–"}<small>/5</small></div>
@@ -845,9 +948,38 @@ function bloquePuntajes(clave, votoExterno, votosExternos, fuente = { nombre: "T
 // ---------- Usuarios, reseñas y amigos ----------
 // Círculo con la inicial; el color sale del nombre, así cada usuario tiene siempre el mismo
 function avatar(nombre, grande = false) {
+  const foto = fotos.de(nombre);
+  if (foto) return `<img class="avatar ${grande ? "grande" : ""}" src="${foto}" alt="">`;
   const tono = [...nombre].reduce((suma, c) => suma + c.charCodeAt(0) * 7, 0) % 360;
   return `<span class="avatar ${grande ? "grande" : ""}" style="--tono:${tono}">${escapar(nombre[0].toUpperCase())}</span>`;
 }
+
+// Fotos de perfil: { [usuario]: "data:image/jpeg;base64,..." }, chicas para no agrandar los datos del sitio
+const fotos = {
+  LADO: 192,
+  de(usuario) {
+    return store.leer("fotos", {})[usuario] ?? null;
+  },
+  guardar(usuario, foto) {
+    const todas = store.leer("fotos", {});
+    if (foto) todas[usuario] = foto;
+    else delete todas[usuario];
+    store.guardar("fotos", todas);
+  },
+  // Recorta la imagen al centro, la achica a LADO×LADO y la pasa a JPEG
+  async preparar(archivo) {
+    if (!archivo.type.startsWith("image/")) throw new Error("El archivo tiene que ser una imagen.");
+    if (archivo.size > 15 * 1024 * 1024) throw new Error("La imagen pesa más de 15 MB.");
+    const imagen = await createImageBitmap(archivo);
+    const lado = Math.min(imagen.width, imagen.height);
+    const lienzo = document.createElement("canvas");
+    lienzo.width = lienzo.height = this.LADO;
+    lienzo.getContext("2d").drawImage(imagen,
+      (imagen.width - lado) / 2, (imagen.height - lado) / 2, lado, lado, 0, 0, this.LADO, this.LADO);
+    imagen.close();
+    return lienzo.toDataURL("image/jpeg", 0.85);
+  },
+};
 
 function linkUsuario(nombre) {
   return `<a class="link-usuario" href="#/usuario/${encodeURIComponent(nombre)}">${avatar(nombre)}${escapar(nombre)}</a>`;
@@ -1028,6 +1160,87 @@ function eventosAmistad() {
       recargar();
     };
   });
+}
+
+// ---------- Colecciones ----------
+function tarjetaColeccion(c, { autor = true } = {}) {
+  const imagenes = c.items.filter((i) => i.imagen).slice(0, 4);
+  return `
+    <a class="tarjeta coleccion" href="#/coleccion/${c.id}">
+      <div class="collage">
+        ${imagenes.map((i) => `<img src="${i.imagen}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">`).join("")}
+        ${imagenes.length ? "" : `<span>${escapar(c.titulo)}</span>`}
+      </div>
+      <div class="info">
+        <h3>${escapar(c.titulo)}</h3>
+        <div class="meta">
+          <span>${TIPOS_COLECCION[tipoColeccion(c.items)]}</span>
+          <span>${c.items.length}</span>
+        </div>
+        <div class="meta">
+          <span>${autor ? `por ${escapar(c.autor)}` : ""}</span>
+          <span>♥ ${c.likes.length}</span>
+        </div>
+      </div>
+    </a>`;
+}
+
+// Lo que se está viendo (película, serie o disco), para agregarlo a una colección
+let itemParaColeccion = null;
+// Que el desplegable siga abierto después de agregar o quitar (se cierra al cambiar de página)
+let coleccionesAbiertas = false;
+
+// item: { clave, titulo, subtitulo, imagen, anio }
+function bloqueColecciones(item) {
+  const usuario = auth.usuarioActual();
+  if (!usuario) return "";
+  itemParaColeccion = item;
+  const mias = colecciones.deUsuario(usuario);
+  const enCuantas = mias.filter((c) => c.items.some((i) => i.clave === item.clave)).length;
+  return `
+    <details class="desplegable agregar-coleccion" id="agregar-coleccion" ${coleccionesAbiertas ? "open" : ""}>
+      <summary>📚 ${enCuantas
+        ? `Está en ${enCuantas} ${enCuantas === 1 ? "colección tuya" : "colecciones tuyas"}`
+        : "Agregar a una colección"}</summary>
+      ${mias.length ? `
+        <div class="botones-colecciones">
+          ${mias.map((c) => {
+            const esta = c.items.some((i) => i.clave === item.clave);
+            return `<button class="btn chico ${esta ? "" : "secundario"}" data-coleccion-item="${c.id}">
+              ${esta ? "✓" : "+"} ${escapar(c.titulo)}</button>`;
+          }).join("")}
+        </div>` : ""}
+      <form class="fila-form" id="form-coleccion-nueva-item">
+        <input type="text" name="titulo" placeholder="Nueva colección…" maxlength="80" required>
+        <button class="btn chico">Crear y agregar</button>
+      </form>
+    </details>`;
+}
+
+function eventosColecciones() {
+  const usuario = auth.usuarioActual();
+  const bloque = document.getElementById("agregar-coleccion");
+  if (!usuario || !bloque) return;
+  const item = itemParaColeccion;
+
+  bloque.querySelectorAll("[data-coleccion-item]").forEach((b) => {
+    b.onclick = () => {
+      const id = b.dataset.coleccionItem;
+      if (colecciones.contiene(id, item.clave)) colecciones.quitarItem(id, item.clave);
+      else colecciones.agregarItem(id, item);
+      coleccionesAbiertas = true;
+      recargar();
+    };
+  });
+
+  document.getElementById("form-coleccion-nueva-item").onsubmit = (e) => {
+    e.preventDefault();
+    const titulo = e.target.elements.titulo.value.trim();
+    if (!titulo) return;
+    colecciones.agregarItem(colecciones.crear(usuario, titulo), item);
+    coleccionesAbiertas = true;
+    recargar();
+  };
 }
 
 // Recomendaciones y "similares" de TMDB juntas, las más conocidas primero
@@ -1214,15 +1427,47 @@ function avisoError(error) {
   return `<div class="aviso error">No se pudo cargar la información: ${escapar(error.message)}</div>`;
 }
 
+// Grupos del menú; "rutas" son los comienzos de ruta que marcan el grupo como activo
+const MENU = [
+  { titulo: "🎬 Cine", rutas: ["/catalogo", "/series", "/pelicula", "/serie", "/persona", "/tag/"], links: [
+    ["#/catalogo", "Catálogo"],
+    ["#/series", "Series"],
+  ] },
+  { titulo: "🎵 Música", rutas: ["/musica", "/artista", "/album"], links: [
+    ["#/musica", "Explorar música"],
+    ["#/musica/charts", "Charts"],
+  ] },
+  { titulo: "🎮 Juegos", rutas: ["/juegos", "/juego/"], links: [
+    ["#/juegos", "Explorar juegos"],
+    ["#/juegos/charts", "Charts"],
+  ] },
+  { titulo: "👥 Comunidad", rutas: ["/comunidad", "/colecciones", "/coleccion/", "/tags", "/usuario"], links: [
+    ["#/comunidad", "Usuarios y reseñas"],
+    ["#/colecciones", "Colecciones"],
+    ["#/tags", "Tags"],
+  ] },
+];
+
 function renderMenu() {
   document.getElementById("menu").innerHTML = `
     <a href="#/">Inicio</a>
-    <a href="#/catalogo">Catálogo</a>
-    <a href="#/series">Series</a>
-    <a href="#/tags">Tags</a>
-    <a href="#/musica">Música</a>
-    <a href="#/comunidad">Comunidad</a>
+    ${MENU.map((grupo, i) => `
+      <div class="menu-grupo" data-grupo-menu="${i}">
+        <button type="button" class="menu-boton">${grupo.titulo} <span aria-hidden="true">▾</span></button>
+        <div class="submenu">
+          ${grupo.links.map(([href, texto]) => `<a href="${href}">${texto}</a>`).join("")}
+        </div>
+      </div>`).join("")}
     ${auth.esAdmin() ? `<a href="#/admin">⚙ Admin</a>` : ""}`;
+  marcarMenu();
+}
+
+// Resalta el grupo del menú de la página actual
+function marcarMenu() {
+  const ruta = location.hash.slice(1) || "/";
+  document.querySelectorAll("[data-grupo-menu]").forEach((g) => {
+    g.classList.toggle("activo", MENU[g.dataset.grupoMenu].rutas.some((r) => ruta.startsWith(r)));
+  });
 }
 
 function renderZonaUsuario() {
@@ -1333,6 +1578,10 @@ async function vistaPelicula(id) {
           <p>${escapar(peli.overview || "Sin sinopsis disponible.")}</p>
 
           ${bloquePuntajes(id, peli.vote_average, peli.vote_count)}
+          ${bloqueColecciones({
+            clave: String(id), titulo: peli.title, subtitulo: "Película",
+            imagen: peli.poster_path ? `${IMG}w342${peli.poster_path}` : null, anio: anio(peli.release_date),
+          })}
         </div>
       </div>
     </div>
@@ -1481,6 +1730,7 @@ function eventosPelicula(id) {
   eventosOpiniones(Number(id));
   eventosTagsCatalogo();
   eventosCarruseles();
+  eventosColecciones();
 }
 
 function datalistTags() {
@@ -1508,12 +1758,13 @@ function carrusel(obras, total, rutaTodas, dibujar = (o) => tarjeta(o)) {
     </div>`;
 }
 
-// Pestañas entre los tags de películas y series y los de música
+// Pestañas entre los tags de películas y series, los de música y los de juegos
 function pestanasTags(activa) {
   return `
     <nav class="pestanas-tags">
       <a class="${activa === "cine" ? "activa" : ""}" href="#/tags">🎬 Películas y series</a>
       <a class="${activa === "musica" ? "activa" : ""}" href="#/tags/musica">🎵 Música</a>
+      <a class="${activa === "juegos" ? "activa" : ""}" href="#/tags/juegos">🎮 Juegos</a>
     </nav>`;
 }
 
@@ -1748,6 +1999,10 @@ async function vistaSerie(id) {
             </p>` : ""}
 
           ${bloquePuntajes(claveSerie(id), serie.vote_average, serie.vote_count)}
+          ${bloqueColecciones({
+            clave: claveSerie(id), titulo: serie.name, subtitulo: "Serie",
+            imagen: serie.poster_path ? `${IMG}w342${serie.poster_path}` : null, anio: anio(serie.first_air_date),
+          })}
         </div>
       </div>
     </div>
@@ -1782,6 +2037,7 @@ function eventosSerie(id) {
   eventosOpiniones(claveSerie(id));
   eventosTagsCatalogo();
   eventosCarruseles();
+  eventosColecciones();
 }
 
 let temporadaActual = null;
@@ -2197,48 +2453,6 @@ async function vistaPersona(id) {
 }
 
 // ---------- Música (MusicBrainz) ----------
-// Ranking de discos según los puntajes del sitio. Con pocos votos, el promedio se acerca
-// a la media general (así un disco con un solo 5 no le gana a uno con veinte 4,5).
-function rankingDiscos(decada = "") {
-  const meta = discos.todos();
-  const filas = Object.entries(store.leer("ratings", {}))
-    .filter(([clave]) => clave.startsWith("album-"))
-    .map(([clave, porUsuario]) => {
-      const valores = Object.values(porUsuario);
-      const mbid = clave.slice("album-".length);
-      if (!valores.length || !meta[mbid]) return null;
-      return { mbid, disco: meta[mbid], votos: valores.length, promedio: valores.reduce((a, b) => a + b, 0) / valores.length };
-    })
-    .filter(Boolean);
-  const media = filas.length ? filas.reduce((suma, f) => suma + f.promedio, 0) / filas.length : 3;
-  return filas
-    .filter((f) => !decada || f.disco.anio?.slice(0, 3) === decada.slice(0, 3))
-    .map((f) => ({ ...f, puntaje: (f.promedio * f.votos + media * 2) / (f.votos + 2) }))
-    .sort((a, b) => b.puntaje - a.puntaje || b.votos - a.votos);
-}
-
-function tablaRanking(filas) {
-  return `
-    <ol class="ranking">
-      ${filas.map((f, i) => `
-        <li>
-          <span class="puesto">${i + 1}</span>
-          <a class="mini-tapa" href="#/album/${f.mbid}">${tapa(f.mbid, f.disco.titulo)}</a>
-          <div class="crece">
-            <a class="titulo-disco" href="#/album/${f.mbid}">${escapar(f.disco.titulo)}</a>
-            <div class="suave">
-              ${f.disco.artistas.map((a) => `<a class="link-persona" href="#/artista/${a.id}">${escapar(a.nombre)}</a>${escapar(a.union)}`).join("")}
-              · ${f.disco.anio ?? "s/f"} · ${escapar(f.disco.tipo)}
-            </div>
-          </div>
-          <div class="nota-ranking">
-            <strong>${f.promedio.toFixed(2)}</strong>
-            <span>${f.votos} ${f.votos === 1 ? "voto" : "votos"}</span>
-          </div>
-        </li>`).join("")}
-    </ol>`;
-}
-
 function formBusquedaMusica(q = "") {
   return `
     <form id="form-buscar-musica" class="fila-form">
@@ -2258,7 +2472,7 @@ function eventosBusquedaMusica() {
 }
 
 async function vistaMusica() {
-  const ranking = rankingDiscos().slice(0, 10);
+  const ranking = rankingDe("musica").slice(0, 10);
   const ultimas = resenas.todas().filter((r) => r.clave.startsWith("album-")).slice(0, 6);
   const obras = await obrasDeClaves(ultimas.map((r) => r.clave));
   document.title = `Música · El "Santi"-Grial`;
@@ -2273,7 +2487,7 @@ async function vistaMusica() {
     <section class="seccion">
       <h2>Charts del sitio ${ranking.length ? `<a href="#/musica/charts">Ver todos →</a>` : ""}</h2>
       ${ranking.length
-        ? tablaRanking(ranking)
+        ? tablaRanking("musica", ranking)
         : `<p class="suave">Todavía nadie puntuó discos. Buscá uno y sé el primero.</p>`}
     </section>
 
@@ -2467,8 +2681,13 @@ async function vistaAlbum(mbid) {
           ${rg.releases.length > 1 ? `<span>${rg.releases.length} ediciones</span>` : ""}
         </div>
         <div class="tags">${generos.map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}</div>
-        ${bloqueTagsMusica(mbid)}
+        ${bloqueTags("musica", mbid)}
         ${bloquePuntajes(claveDisco(mbid), rg.rating?.value, rg.rating?.["votes-count"], { nombre: "MusicBrainz", maximo: 5 })}
+        ${bloqueColecciones({
+          clave: claveDisco(mbid), titulo: rg.title,
+          subtitulo: (rg["artist-credit"] ?? []).map((c) => c.name + (c.joinphrase ?? "")).join(""),
+          imagen: tapaDe(mbid), anio: rg["first-release-date"]?.slice(0, 4) ?? "s/f",
+        })}
         <div class="tags">
           <a class="tag" href="https://musicbrainz.org/release-group/${mbid}" target="_blank" rel="noopener">MusicBrainz ↗</a>
         </div>
@@ -2495,212 +2714,889 @@ async function vistaAlbum(mbid) {
 
 function eventosAlbum(mbid) {
   eventosOpiniones(claveDisco(mbid));
-  eventosTagsMusica(mbid);
+  eventosTags("musica", mbid);
+  eventosColecciones();
 }
 
-async function vistaCharts(decada = "") {
-  const ranking = rankingDiscos(decada);
-  const decadas = [...new Set(Object.values(discos.todos()).map((d) => d.anio?.slice(0, 3)).filter(Boolean))]
+// ---------- Juegos (LizardByte GameDB) ----------
+// GameDB son archivos JSON estáticos armados con datos de IGDB: la ficha de cada juego,
+// las sagas y la búsqueda, repartida en "baldes" según las dos primeras letras del nombre.
+const GAMEDB = "https://app.lizardbyte.dev/GameDB";
+const cacheGamedb = new Map();
+
+function gamedb(ruta) {
+  if (!cacheGamedb.has(ruta)) {
+    const pedido = fetch(GAMEDB + ruta).then((resp) => {
+      if (resp.status === 404) throw new Error("GameDB no tiene ese juego");
+      if (!resp.ok) throw new Error(`GameDB respondió ${resp.status}`);
+      return resp.json();
+    });
+    cacheGamedb.set(ruta, pedido);
+    pedido.catch(() => cacheGamedb.delete(ruta));
+  }
+  return cacheGamedb.get(ruta);
+}
+
+// Las imágenes de IGDB vienen en miniatura; el tamaño se elige cambiando "t_thumb"
+function imagenIgdb(url, tamanio) {
+  return url ? `https:${url.replace("t_thumb", `t_${tamanio}`)}` : null;
+}
+
+// { [id]: { nombre, corto } }. El archivo original pesa ~450 KB: se guarda achicado en este navegador.
+let plataformasGamedb = null;
+
+async function plataformas() {
+  if (plataformasGamedb) return plataformasGamedb;
+  try {
+    plataformasGamedb = JSON.parse(localStorage.getItem("plataformas_gamedb"));
+    if (plataformasGamedb) return plataformasGamedb;
+  } catch { /* se vuelven a pedir */ }
+  const todas = await gamedb("/platforms/all.json");
+  plataformasGamedb = Object.fromEntries(Object.values(todas).map((p) =>
+    [p.id, { nombre: p.name, corto: p.abbreviation || p.name }]));
+  try { localStorage.setItem("plataformas_gamedb", JSON.stringify(plataformasGamedb)); } catch { /* sin espacio */ }
+  return plataformasGamedb;
+}
+
+function claveJuego(id) {
+  return `juego-${id}`;
+}
+
+function anioJuego(juego) {
+  const anios = (juego.release_dates ?? []).map((r) => r.y).filter(Boolean);
+  return anios.length ? String(Math.min(...anios)) : null;
+}
+
+// Busca por nombre. El balde es el de las dos primeras letras de lo buscado; como muchos
+// juegos empiezan con "The" ("The Legend of Zelda"), también se busca en el balde "th".
+async function buscarJuegos(q) {
+  const texto = sinAcentos(q.trim());
+  const limpio = texto.replace(/[^a-z0-9]/g, "");
+  const baldes = [limpio.slice(0, 2) || "@"];
+  if (!limpio.startsWith("th")) baldes.push("th");
+  const datos = await Promise.all(baldes.map((b) => gamedb(`/buckets/${encodeURIComponent(b)}.json`).catch(() => ({}))));
+
+  const encontrados = new Map();
+  for (const balde of datos) {
+    for (const [id, juego] of Object.entries(balde)) {
+      if (sinAcentos(juego.name).includes(texto)) encontrados.set(id, juego.name);
+    }
+  }
+  // Primero los que tienen lo buscado como palabra completa ("Zelda" sí, "Zelda3" no),
+  // después los que empiezan con eso (sin contar el "The") y después los nombres más cortos
+  const palabra = new RegExp(`(^|[^a-z0-9])${texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^a-z0-9])`);
+  const enPalabra = (nombre) => palabra.test(sinAcentos(nombre));
+  const empieza = (nombre) => sinAcentos(nombre).replace(/^the /, "").startsWith(texto);
+  return [...encontrados]
+    .sort(([, a], [, b]) => enPalabra(b) - enPalabra(a) || empieza(b) - empieza(a) || a.length - b.length)
+    .map(([id, nombre]) => ({ id, nombre }));
+}
+
+// Fichas de los mejores resultados de una búsqueda: se piden varios candidatos y se
+// ordenan por puntaje de IGDB, así los juegos conocidos quedan antes que los caseros
+async function fichasDeBusqueda(encontrados, cantidad) {
+  const candidatos = await Promise.all(encontrados.slice(0, Math.max(cantidad, 80)).map(({ id, nombre }) =>
+    gamedb(`/games/${id}.json`).catch(() => ({ id: Number(id), name: nombre }))));
+  const relevancia = (j) => (j.cover ? 1000 : 0) + (j.aggregated_rating ?? j.rating ?? 0) + (j.aggregated_rating && j.rating ? 50 : 0);
+  return candidatos.sort((a, b) => relevancia(b) - relevancia(a)).slice(0, cantidad);
+}
+
+// Datos básicos de los juegos que alguien visitó, guardados en el servidor (perfiles, charts, tags):
+// { [id]: { titulo, anio, portada, plataformas } }
+const juegos = {
+  todos() {
+    return store.leer("juegos", {});
+  },
+  de(id) {
+    return this.todos()[id] ?? null;
+  },
+  datosDe(juego, mapaPlataformas = {}) {
+    return {
+      titulo: juego.name,
+      anio: anioJuego(juego),
+      portada: imagenIgdb(juego.cover?.url, "cover_big"),
+      plataformas: (juego.platforms ?? []).map((p) => mapaPlataformas[p]?.corto).filter(Boolean).slice(0, 4).join(", "),
+    };
+  },
+  recordar(juego, mapaPlataformas) {
+    if (this.de(juego.id)) return;
+    const todos = this.todos();
+    todos[juego.id] = this.datosDe(juego, mapaPlataformas);
+    store.guardar("juegos", todos);
+  },
+};
+
+function portadaJuego(datos) {
+  return datos.portada
+    ? `<img class="poster" src="${datos.portada}" alt="${escapar(datos.titulo)}" loading="lazy">`
+    : `<div class="sin-poster">${escapar(datos.titulo)}</div>`;
+}
+
+function tarjetaJuego(id, datos) {
+  const local = ratings.promedio(claveJuego(id));
+  return `
+    <a class="tarjeta juego" href="#/juego/${id}">
+      ${portadaJuego(datos)}
+      <div class="info">
+        <h3>${escapar(datos.titulo)}</h3>
+        ${datos.plataformas ? `<div class="artista">${escapar(datos.plataformas)}</div>` : ""}
+        <div class="meta">
+          <span>${datos.anio ?? "s/f"}</span>
+          ${local ? `<span>${local.valor.toFixed(1)}/5</span>` : ""}
+        </div>
+      </div>
+    </a>`;
+}
+
+function tarjetaJuegoGuardado(id) {
+  return tarjetaJuego(id, juegos.de(id) ?? { titulo: "Juego" });
+}
+
+// Juegos conocidos para que la sección no arranque vacía
+const JUEGOS_DESTACADOS = [7346, 1942, 119133, 25076, 1020, 472, 113112, 11133, 19560, 26758, 72, 1009];
+
+function formBusquedaJuegos(q = "") {
+  return `
+    <form id="form-buscar-juegos" class="fila-form">
+      <input type="search" name="q" placeholder="Buscar juegos…" value="${escapar(q)}" required autocomplete="off">
+      <button class="btn">Buscar</button>
+    </form>`;
+}
+
+function eventosBusquedaJuegos() {
+  const form = document.getElementById("form-buscar-juegos");
+  if (!form) return;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const q = form.elements.q.value.trim();
+    if (q) location.hash = `#/juegos/buscar/${encodeURIComponent(q)}`;
+  };
+}
+
+async function vistaJuegos() {
+  const [destacados, mapa] = await Promise.all([
+    Promise.all(JUEGOS_DESTACADOS.map((id) => gamedb(`/games/${id}.json`).catch(() => null))),
+    plataformas().catch(() => ({})),
+  ]);
+  const top = rankingDe("juegos").slice(0, 10);
+  const ultimas = resenas.todas().filter((r) => r.clave.startsWith("juego-")).slice(0, 6);
+  const obras = await obrasDeClaves(ultimas.map((r) => r.clave));
+  document.title = `Juegos · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion panel">
+      <h1 style="margin-top:0">🎮 Juegos</h1>
+      <p class="suave">Buscá juegos en la base de LizardByte GameDB, puntualos, escribí reseñas y armá colecciones.</p>
+      ${formBusquedaJuegos()}
+    </section>
+
+    <section class="seccion">
+      <h2>Destacados</h2>
+      ${carrusel(destacados.filter(Boolean), 0, "", (j) => tarjetaJuego(j.id, juegos.datosDe(j, mapa)))}
+    </section>
+
+    <section class="seccion">
+      <h2>Charts del sitio ${top.length ? `<a href="#/juegos/charts">Ver todos →</a>` : ""}</h2>
+      ${top.length ? tablaRanking("juegos", top) : `<p class="suave">Todavía nadie puntuó juegos. Buscá uno y sé el primero.</p>`}
+    </section>
+
+    <section class="seccion">
+      <h2>Reseñas recientes de juegos</h2>
+      <div class="resenas">
+        ${ultimas.map((r) => tarjetaResena(r, { obra: obras[r.clave] })).join("")
+          || `<p class="suave">Todavía no hay reseñas de juegos.</p>`}
+      </div>
+    </section>`;
+}
+
+function eventosJuegos() {
+  eventosBusquedaJuegos();
+  eventosLikes();
+  eventosCarruseles();
+}
+
+async function vistaBusquedaJuegos(q) {
+  q = decodeURIComponent(q);
+  const [encontrados, mapa] = await Promise.all([buscarJuegos(q), plataformas().catch(() => ({}))]);
+  const MAXIMO = 36;
+  const fichas = await fichasDeBusqueda(encontrados, MAXIMO);
+  document.title = `Buscar "${q}" en juegos · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion">${formBusquedaJuegos(q)}</section>
+    <section class="seccion">
+      <h2>Resultados para "${escapar(q)}" <span class="suave" style="font-size:1rem">${encontrados.length}</span></h2>
+      ${fichas.length
+        ? `<div class="grilla">${fichas.map((j) => tarjetaJuego(j.id, juegos.datosDe(j, mapa))).join("")}</div>`
+        : `<p class="suave">No se encontraron juegos. GameDB busca por el principio del nombre: probá con las primeras palabras del título.</p>`}
+      ${encontrados.length > MAXIMO ? `<p class="suave nota">Se muestran los primeros ${MAXIMO}. Probá con un nombre más específico.</p>` : ""}
+    </section>`;
+}
+
+const CLASIFICACIONES = ["ESRB", "PEGI"];
+
+async function vistaJuego(id) {
+  const [juego, mapa] = await Promise.all([gamedb(`/games/${id}.json`), plataformas().catch(() => ({}))]);
+  juegos.recordar(juego, mapa);
+
+  // Otros juegos de la misma saga (la "collection" de IGDB), ordenados por año
+  const saga = juego.collections?.[0];
+  let deLaSaga = [];
+  if (saga) {
+    const coleccionSaga = await gamedb(`/collections/${saga.id}.json`).catch(() => ({ games: [] }));
+    deLaSaga = (await Promise.all(coleccionSaga.games.filter((g) => g !== juego.id).slice(0, 20)
+      .map((g) => gamedb(`/games/${g}.json`).catch(() => null))))
+      .filter(Boolean)
+      .sort((a, b) => (anioJuego(a) ?? "9999").localeCompare(anioJuego(b) ?? "9999"));
+  }
+
+  const datos = juegos.datosDe(juego, mapa);
+  const desarrollo = (juego.involved_companies ?? []).filter((c) => c.developer).map((c) => c.company.name);
+  const otras = (juego.involved_companies ?? []).filter((c) => !c.developer).map((c) => c.company.name);
+  const clasificaciones = (juego.age_ratings ?? [])
+    .filter((r) => CLASIFICACIONES.includes(r.organization?.name))
+    .map((r) => `${r.organization.name} ${r.rating_category?.rating ?? ""}`.trim());
+  const steam = (juego.external_games ?? []).find((e) => e.external_game_source?.name === "Steam");
+  const fondo = imagenIgdb(juego.artworks?.[0]?.url ?? juego.screenshots?.[0]?.url, "1080p");
+  // La crítica (aggregated_rating) o, si no hay, los usuarios de IGDB; ambos sobre 100
+  const puntajeIgdb = juego.aggregated_rating ?? juego.rating;
+  document.title = `${juego.name} · El "Santi"-Grial`;
+
+  return `
+    <div class="fondo-peli" style="${fondo ? `background-image:url('${fondo}')` : ""}">
+      <div class="detalle juego">
+        ${juego.cover
+          ? `<img class="poster" src="${imagenIgdb(juego.cover.url, "cover_big_2x")}" alt="${escapar(juego.name)}">`
+          : `<div class="sin-poster">Sin portada</div>`}
+        <div>
+          <h1>${escapar(juego.name)} <span class="suave">(${datos.anio ?? "s/f"})</span></h1>
+          <div class="datos">
+            ${desarrollo.length ? `<span>🏢 ${desarrollo.map(escapar).join(", ")}</span>` : ""}
+            ${otras.length ? `<span>Con ${otras.map(escapar).join(", ")}</span>` : ""}
+            ${juego.game_modes?.length ? `<span>👥 ${juego.game_modes.map((m) => escapar(m.name)).join(", ")}</span>` : ""}
+            ${juego.player_perspectives?.length ? `<span>👁 ${juego.player_perspectives.map((p) => escapar(p.name)).join(", ")}</span>` : ""}
+            ${clasificaciones.length ? `<span>🔞 ${clasificaciones.map(escapar).join(" · ")}</span>` : ""}
+            ${saga ? `<span>Saga: ${escapar(saga.name)}</span>` : ""}
+          </div>
+          <div class="tags">
+            ${(juego.platforms ?? []).map((p) => `<span class="tag">${escapar(mapa[p]?.nombre ?? `Plataforma ${p}`)}</span>`).join("")}
+          </div>
+          <div class="tags">
+            ${[...(juego.genres ?? []), ...(juego.themes ?? [])].map((g) => `<span class="tag genero">${escapar(g.name)}</span>`).join("")}
+          </div>
+          ${bloqueTags("juegos", juego.id)}
+
+          ${juego.summary ? `<p>${escapar(juego.summary)}</p>` : `<p class="suave">Sin descripción.</p>`}
+          ${juego.storyline ? `
+            <details class="desplegable">
+              <summary>Historia</summary>
+              <p>${escapar(juego.storyline)}</p>
+            </details>` : ""}
+          <p class="fuente">Descripción en inglés, de IGDB.</p>
+
+          ${bloquePuntajes(claveJuego(juego.id), puntajeIgdb ? puntajeIgdb / 10 : null, null,
+            { nombre: juego.aggregated_rating ? "Crítica (IGDB)" : "Usuarios de IGDB", maximo: 10 })}
+          ${bloqueColecciones({
+            clave: claveJuego(juego.id), titulo: juego.name, subtitulo: datos.plataformas || "Juego",
+            imagen: datos.portada, anio: datos.anio ?? "s/f",
+          })}
+          <div class="tags">
+            ${juego.url ? `<a class="tag" href="${juego.url}" target="_blank" rel="noopener">IGDB ↗</a>` : ""}
+            ${steam ? `<a class="tag" href="https://store.steampowered.com/app/${encodeURIComponent(steam.uid)}" target="_blank" rel="noopener">Steam ↗</a>` : ""}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    ${seccionTrailer(juego.videos?.[0] ? { key: juego.videos[0].video_id } : null)}
+
+    ${juego.screenshots?.length ? `
+      <section class="seccion">
+        <h2>Capturas</h2>
+        <div class="capturas">
+          ${juego.screenshots.slice(0, 9).map((s) => `
+            <a href="${imagenIgdb(s.url, "1080p")}" target="_blank" rel="noopener">
+              <img src="${imagenIgdb(s.url, "screenshot_med")}" alt="" loading="lazy">
+            </a>`).join("")}
+        </div>
+      </section>` : ""}
+
+    ${deLaSaga.length ? `
+      <section class="seccion">
+        <h2>De la misma saga</h2>
+        ${carrusel(deLaSaga, 0, "", (j) => tarjetaJuego(j.id, juegos.datosDe(j, mapa)))}
+      </section>` : ""}
+
+    ${seccionResenas(claveJuego(juego.id), juego.name)}`;
+}
+
+function eventosJuego(id) {
+  eventosOpiniones(claveJuego(Number(id)));
+  eventosTags("juegos", Number(id));
+  eventosCarruseles();
+  eventosColecciones();
+}
+
+// ---------- Lo que comparten música y juegos: charts y tags ----------
+const GRUPOS = {
+  musica: {
+    nombre: "Música",
+    icono: "🎵",
+    prefijo: "album-",
+    singular: "disco",
+    plural: "discos",
+    inicio: "#/musica",
+    ruta: (id) => `#/album/${id}`,
+    datos: (id) => discos.de(id),
+    subtitulo: (d) => nombreArtistas(d),
+    nombreSubtitulo: "Artista",
+    imagen: (id, d) => tapa(id, d.titulo),
+    detalle: (d) => `${d.artistas.map((a) =>
+      `<a class="link-persona" href="#/artista/${a.id}">${escapar(a.nombre)}</a>${escapar(a.union)}`).join("")}
+      · ${d.anio ?? "s/f"} · ${escapar(d.tipo)}`,
+    tarjeta: (id) => tarjetaDiscoGuardado(id),
+  },
+  juegos: {
+    nombre: "Juegos",
+    icono: "🎮",
+    prefijo: "juego-",
+    singular: "juego",
+    plural: "juegos",
+    inicio: "#/juegos",
+    ruta: (id) => `#/juego/${id}`,
+    datos: (id) => juegos.de(id),
+    subtitulo: (d) => d.plataformas ?? "",
+    nombreSubtitulo: "Plataformas",
+    imagen: (id, d) => portadaJuego(d),
+    detalle: (d) => `${escapar(d.plataformas || "Juego")} · ${d.anio ?? "s/f"}`,
+    tarjeta: (id) => tarjetaJuegoGuardado(id),
+  },
+};
+
+function cantidadDe(grupo, n) {
+  const g = GRUPOS[grupo];
+  return `${n} ${n === 1 ? g.singular : g.plural}`;
+}
+
+// Ranking según los puntajes del sitio. Con pocos votos, el promedio se acerca a la
+// media general (así algo con un solo 5 no le gana a algo con veinte 4,5).
+function rankingDe(grupo, decada = "") {
+  const g = GRUPOS[grupo];
+  const filas = Object.entries(store.leer("ratings", {}))
+    .filter(([clave]) => clave.startsWith(g.prefijo))
+    .map(([clave, porUsuario]) => {
+      const valores = Object.values(porUsuario);
+      const id = clave.slice(g.prefijo.length);
+      const datos = g.datos(id);
+      if (!valores.length || !datos) return null;
+      return { id, datos, votos: valores.length, promedio: valores.reduce((a, b) => a + b, 0) / valores.length };
+    })
+    .filter(Boolean);
+  const media = filas.length ? filas.reduce((suma, f) => suma + f.promedio, 0) / filas.length : 3;
+  return filas
+    .filter((f) => !decada || f.datos.anio?.slice(0, 3) === decada.slice(0, 3))
+    .map((f) => ({ ...f, puntaje: (f.promedio * f.votos + media * 2) / (f.votos + 2) }))
+    .sort((a, b) => b.puntaje - a.puntaje || b.votos - a.votos);
+}
+
+function tablaRanking(grupo, filas) {
+  const g = GRUPOS[grupo];
+  return `
+    <ol class="ranking">
+      ${filas.map((f, i) => `
+        <li>
+          <span class="puesto">${i + 1}</span>
+          <a class="mini-tapa ${grupo}" href="${g.ruta(f.id)}">${g.imagen(f.id, f.datos)}</a>
+          <div class="crece">
+            <a class="titulo-disco" href="${g.ruta(f.id)}">${escapar(f.datos.titulo)}</a>
+            <div class="suave">${g.detalle(f.datos)}</div>
+          </div>
+          <div class="nota-ranking">
+            <strong>${f.promedio.toFixed(2)}</strong>
+            <span>${f.votos} ${f.votos === 1 ? "voto" : "votos"}</span>
+          </div>
+        </li>`).join("")}
+    </ol>`;
+}
+
+function vistaCharts(grupo, decada = "") {
+  const g = GRUPOS[grupo];
+  const ranking = rankingDe(grupo, decada);
+  const todos = grupo === "musica" ? discos.todos() : juegos.todos();
+  const decadas = [...new Set(Object.values(todos).map((d) => d.anio?.slice(0, 3)).filter(Boolean))]
     .sort().reverse().map((d) => `${d}0`);
-  document.title = `Charts · El "Santi"-Grial`;
+  document.title = `Charts de ${g.nombre.toLowerCase()} · El "Santi"-Grial`;
 
   return `
     <section class="seccion">
+      <p class="miga"><a href="${g.inicio}">${g.icono} ${g.nombre}</a></p>
       <h2>Charts del sitio ${decada ? `<span class="suave" style="font-size:1rem">años ${decada.slice(2)}</span>` : ""}</h2>
       <div class="controles">
         <label>Década
-          <select id="decada-charts">
+          <select id="decada-charts" data-grupo="${grupo}">
             <option value="">Todas</option>
             ${decadas.map((d) => `<option value="${d}" ${d === decada ? "selected" : ""}>${d}s</option>`).join("")}
           </select>
         </label>
       </div>
       <p class="suave nota">Ordenados por promedio ponderado: con pocos votos, el puntaje se acerca a la media del sitio.</p>
-      ${ranking.length ? tablaRanking(ranking.slice(0, 100)) : `<p class="suave">No hay discos puntuados${decada ? " de esa década" : ""}.</p>`}
+      ${ranking.length
+        ? tablaRanking(grupo, ranking.slice(0, 100))
+        : `<p class="suave">No hay ${g.plural} puntuados${decada ? " de esa década" : ""}.</p>`}
     </section>`;
 }
 
 function eventosCharts() {
   const decada = document.getElementById("decada-charts");
   if (decada) decada.onchange = () => {
-    location.hash = decada.value ? `#/musica/charts/${decada.value}` : "#/musica/charts";
+    const base = `#/${decada.dataset.grupo}/charts`;
+    location.hash = decada.value ? `${base}/${decada.value}` : base;
   };
 }
 
-// ---------- Tags de música (los asignan los admins en la página de cada disco) ----------
-const tagsMusica = {
-  // { tags: { [nombre]: { descripcion } }, discos: { [mbid]: [tags] } }
-  datos() {
-    const datos = store.leer("tags_musica", {});
-    return { tags: datos.tags ?? {}, discos: datos.discos ?? {} };
-  },
-  todas() {
-    return this.datos().tags;
-  },
-  deDisco(mbid) {
-    return this.datos().discos[mbid] ?? [];
-  },
-  discosDe(tag) {
-    return Object.entries(this.datos().discos).filter(([, tags]) => tags.includes(tag)).map(([mbid]) => mbid);
-  },
-  crear(nombre, descripcion = "") {
-    const datos = this.datos();
-    datos.tags[nombre] = { descripcion };
-    store.guardar("tags_musica", datos);
-  },
-  borrar(nombre) {
-    const datos = this.datos();
-    delete datos.tags[nombre];
-    for (const [mbid, tags] of Object.entries(datos.discos)) {
-      datos.discos[mbid] = tags.filter((t) => t !== nombre);
-      if (!datos.discos[mbid].length) delete datos.discos[mbid];
-    }
-    store.guardar("tags_musica", datos);
-  },
-  // Si el tag no existe, se crea
-  agregar(mbid, tag) {
-    const datos = this.datos();
-    datos.tags[tag] ??= { descripcion: "" };
-    datos.discos[mbid] = [...new Set([...(datos.discos[mbid] ?? []), tag])];
-    store.guardar("tags_musica", datos);
-  },
-  quitar(mbid, tag) {
-    const datos = this.datos();
-    datos.discos[mbid] = (datos.discos[mbid] ?? []).filter((t) => t !== tag);
-    if (!datos.discos[mbid].length) delete datos.discos[mbid];
-    store.guardar("tags_musica", datos);
-  },
+// Tags que asignan los admins: { tags: { [nombre]: { descripcion } }, items: { [id]: [tags] } }
+function crearTags(claveServidor) {
+  return {
+    datos() {
+      const datos = store.leer(claveServidor, {});
+      return { tags: datos.tags ?? {}, items: datos.items ?? {} };
+    },
+    guardar(datos) {
+      store.guardar(claveServidor, datos);
+    },
+    todas() {
+      return this.datos().tags;
+    },
+    de(id) {
+      return this.datos().items[id] ?? [];
+    },
+    con(tag) {
+      return Object.entries(this.datos().items).filter(([, tags]) => tags.includes(tag)).map(([id]) => id);
+    },
+    crear(nombre, descripcion = "") {
+      const datos = this.datos();
+      datos.tags[nombre] = { descripcion };
+      this.guardar(datos);
+    },
+    borrar(nombre) {
+      const datos = this.datos();
+      delete datos.tags[nombre];
+      for (const [id, tags] of Object.entries(datos.items)) {
+        datos.items[id] = tags.filter((t) => t !== nombre);
+        if (!datos.items[id].length) delete datos.items[id];
+      }
+      this.guardar(datos);
+    },
+    // Si el tag no existe, se crea
+    agregar(id, tag) {
+      const datos = this.datos();
+      datos.tags[tag] ??= { descripcion: "" };
+      datos.items[id] = [...new Set([...(datos.items[id] ?? []), tag])];
+      this.guardar(datos);
+    },
+    quitar(id, tag) {
+      const datos = this.datos();
+      datos.items[id] = (datos.items[id] ?? []).filter((t) => t !== tag);
+      if (!datos.items[id].length) delete datos.items[id];
+      this.guardar(datos);
+    },
+  };
+}
+
+const TAGS_DE = {
+  musica: crearTags("tags_musica"),
+  juegos: crearTags("tags_juegos"),
 };
 
-function rutaTagMusica(tag) {
-  return `#/tags/musica/${encodeURIComponent(tag)}`;
+function rutaTagDe(grupo, tag) {
+  return `#/tags/${grupo}/${encodeURIComponent(tag)}`;
 }
 
-// Tarjeta de un disco a partir de los datos guardados en "discos"
-function tarjetaDiscoGuardado(mbid) {
-  const disco = discos.de(mbid);
-  return tarjetaDisco(mbid, disco ? { ...disco, artistas: nombreArtistas(disco) } : { titulo: "Disco" });
-}
-
-function cantidadDiscos(n) {
-  return `${n} ${n === 1 ? "disco" : "discos"}`;
-}
-
-// Tags del disco y, para los admins, el formulario para editarlos
-function bloqueTagsMusica(mbid) {
+// Tags de un disco o juego y, para los admins, el formulario para editarlos
+function bloqueTags(grupo, id) {
   const admin = auth.esAdmin();
-  const tags = tagsMusica.deDisco(mbid);
+  const tags = TAGS_DE[grupo];
   return `
     <div class="tags">
-      ${tags.map((t) => `
+      ${tags.de(id).map((t) => `
         <span class="tag especial">
-          <a href="${rutaTagMusica(t)}">#${escapar(t)}</a>
-          ${admin ? `<button class="quitar-tag" data-quitar-tag-musica="${escapar(t)}" title="Quitar tag">✕</button>` : ""}
+          <a href="${rutaTagDe(grupo, t)}">#${escapar(t)}</a>
+          ${admin ? `<button class="quitar-tag" data-quitar-tag-grupo="${escapar(t)}" title="Quitar tag">✕</button>` : ""}
         </span>`).join("")}
     </div>
     ${admin ? `
-      <form class="fila-form" id="form-tag-musica">
-        <input type="text" name="tag" list="lista-tags-musica" placeholder="Agregar tag de música…" required>
-        <datalist id="lista-tags-musica">
-          ${Object.keys(tagsMusica.todas()).map((t) => `<option value="${escapar(t)}">`).join("")}
+      <form class="fila-form" id="form-tag-grupo">
+        <input type="text" name="tag" list="lista-tags-grupo" placeholder="Agregar tag de ${GRUPOS[grupo].nombre.toLowerCase()}…" required>
+        <datalist id="lista-tags-grupo">
+          ${Object.keys(tags.todas()).map((t) => `<option value="${escapar(t)}">`).join("")}
         </datalist>
         <button class="btn chico">+ Tag</button>
       </form>` : ""}`;
 }
 
-function eventosTagsMusica(mbid) {
+function eventosTags(grupo, id) {
   if (!auth.esAdmin()) return;
-  document.getElementById("form-tag-musica").onsubmit = (e) => {
+  const tags = TAGS_DE[grupo];
+  document.getElementById("form-tag-grupo").onsubmit = (e) => {
     e.preventDefault();
     const tag = normalizarTag(e.target.elements.tag.value);
     if (!tag) return;
-    tagsMusica.agregar(mbid, tag);
+    tags.agregar(id, tag);
     recargar();
   };
-  document.querySelectorAll("[data-quitar-tag-musica]").forEach((b) => {
+  document.querySelectorAll("[data-quitar-tag-grupo]").forEach((b) => {
     b.onclick = () => {
-      tagsMusica.quitar(mbid, b.dataset.quitarTagMusica);
+      tags.quitar(id, b.dataset.quitarTagGrupo);
       recargar();
     };
   });
 }
 
-function vistaTagsMusica() {
-  const tags = tagsMusica.todas();
-  document.title = `Tags de música · El "Santi"-Grial`;
+function vistaTagsGrupo(grupo) {
+  const g = GRUPOS[grupo];
+  const tags = TAGS_DE[grupo];
+  document.title = `Tags de ${g.nombre.toLowerCase()} · El "Santi"-Grial`;
 
   return `
     <section class="seccion">
       <h2>Tags</h2>
-      ${pestanasTags("musica")}
-      ${Object.entries(tags).map(([tag, info]) => {
-        const ruta = rutaTagMusica(tag);
-        const mbids = tagsMusica.discosDe(tag);
+      ${pestanasTags(grupo)}
+      ${Object.entries(tags.todas()).map(([tag, info]) => {
+        const ruta = rutaTagDe(grupo, tag);
+        const ids = tags.con(tag);
         return `
           <div class="fila-tag">
             <h3>
               <a class="tag especial grande" href="${ruta}">#${escapar(tag)}</a>
-              <span class="suave">${mbids.length ? cantidadDiscos(mbids.length) : ""}</span>
-              ${mbids.length ? `<a class="ver-tag" href="${ruta}">Ver todos →</a>` : ""}
+              <span class="suave">${ids.length ? cantidadDe(grupo, ids.length) : ""}</span>
+              ${ids.length ? `<a class="ver-tag" href="${ruta}">Ver todos →</a>` : ""}
             </h3>
             ${info.descripcion ? `<p class="suave">${escapar(info.descripcion)}</p>` : ""}
-            ${mbids.length
-              ? carrusel(mbids.slice(0, CANTIDAD_CARRUSEL), mbids.length, ruta, tarjetaDiscoGuardado)
-              : `<p class="suave">Todavía no hay discos con este tag.</p>`}
+            ${ids.length
+              ? carrusel(ids.slice(0, CANTIDAD_CARRUSEL), ids.length, ruta, g.tarjeta)
+              : `<p class="suave">Todavía no hay ${g.plural} con este tag.</p>`}
           </div>`;
       }).join("") || `
         <p class="suave">
-          Todavía no hay tags de música.
-          ${auth.esAdmin() ? `Creá uno en <a href="#/admin" style="color:var(--acento)">Admin</a> o agregáselo a un disco desde su página.` : ""}
+          Todavía no hay tags de ${g.nombre.toLowerCase()}.
+          ${auth.esAdmin() ? `Creá uno en <a href="#/admin" style="color:var(--acento)">Admin</a> o agregáselo a un ${g.singular} desde su página.` : ""}
         </p>`}
     </section>`;
 }
 
-const ORDENES_TAG_MUSICA = {
-  anio: "Año",
-  titulo: "Título",
-  artista: "Artista",
-  puntaje: "Puntaje del sitio",
-};
-
-function vistaTagMusica(tag) {
+function vistaTagGrupo(grupo, tag) {
+  const g = GRUPOS[grupo];
+  const tags = TAGS_DE[grupo];
   tag = normalizarTag(decodeURIComponent(tag));
-  const orden = store.leer("orden_tag_musica", "anio");
-  const promedio = (mbid) => ratings.promedio(claveDisco(mbid))?.valor ?? 0;
-  const dato = (mbid) => discos.de(mbid) ?? { titulo: "", artistas: [], anio: null };
+  const ordenes = { anio: "Año", titulo: "Título", subtitulo: g.nombreSubtitulo, puntaje: "Puntaje del sitio" };
+  const orden = store.leer(`orden_tag_${grupo}`, "anio");
+  const dato = (id) => g.datos(id) ?? { titulo: "", anio: null };
+  const promedio = (id) => ratings.promedio(g.prefijo + id)?.valor ?? 0;
   const comparar = {
     anio: (a, b) => (dato(a).anio ?? "9999").localeCompare(dato(b).anio ?? "9999"),
     titulo: (a, b) => dato(a).titulo.localeCompare(dato(b).titulo),
-    artista: (a, b) => nombreArtistas(dato(a)).localeCompare(nombreArtistas(dato(b))),
+    subtitulo: (a, b) => (g.datos(a) ? g.subtitulo(dato(a)) : "").localeCompare(g.datos(b) ? g.subtitulo(dato(b)) : ""),
     puntaje: (a, b) => promedio(b) - promedio(a),
-  }[orden];
-  const mbids = tagsMusica.discosDe(tag).sort(comparar);
-  const descripcion = tagsMusica.todas()[tag]?.descripcion;
-  document.title = `#${tag} · Música · El "Santi"-Grial`;
+  }[orden] ?? (() => 0);
+  const ids = tags.con(tag).sort(comparar);
+  const descripcion = tags.todas()[tag]?.descripcion;
+  document.title = `#${tag} · ${g.nombre} · El "Santi"-Grial`;
 
   return `
     <section class="seccion">
-      <p class="miga"><a href="#/tags/musica">Tags de música</a></p>
-      <h2>#${escapar(tag)} <span class="suave" style="font-size:1rem">${cantidadDiscos(mbids.length)}</span></h2>
+      <p class="miga"><a href="#/tags/${grupo}">Tags de ${g.nombre.toLowerCase()}</a></p>
+      <h2>#${escapar(tag)} <span class="suave" style="font-size:1rem">${cantidadDe(grupo, ids.length)}</span></h2>
       ${descripcion ? `<p class="suave">${escapar(descripcion)}</p>` : ""}
-      ${mbids.length > 1 ? `
+      ${ids.length > 1 ? `
         <div class="controles">
           <label>Ordenar por
-            <select id="orden-tag-musica">
-              ${Object.entries(ORDENES_TAG_MUSICA).map(([valor, texto]) =>
+            <select id="orden-tag-grupo" data-grupo="${grupo}">
+              ${Object.entries(ordenes).map(([valor, texto]) =>
                 `<option value="${valor}" ${orden === valor ? "selected" : ""}>${texto}</option>`).join("")}
             </select>
           </label>
         </div>` : ""}
-      ${mbids.length
-        ? `<div class="grilla">${mbids.map(tarjetaDiscoGuardado).join("")}</div>`
-        : `<p class="suave">No hay discos con este tag.</p>`}
+      ${ids.length
+        ? `<div class="grilla">${ids.map(g.tarjeta).join("")}</div>`
+        : `<p class="suave">No hay ${g.plural} con este tag.</p>`}
     </section>`;
 }
 
-function eventosTagMusica() {
-  const orden = document.getElementById("orden-tag-musica");
-  if (orden) orden.onchange = () => { store.guardar("orden_tag_musica", orden.value); recargar(); };
+function eventosTagGrupo() {
+  const orden = document.getElementById("orden-tag-grupo");
+  if (orden) orden.onchange = () => { store.guardar(`orden_tag_${orden.dataset.grupo}`, orden.value); recargar(); };
+}
+
+function tarjetaDiscoGuardado(mbid) {
+  const disco = discos.de(mbid);
+  return tarjetaDisco(mbid, disco ? { ...disco, artistas: nombreArtistas(disco) } : { titulo: "Disco" });
+}
+
+// ---------- Páginas de colecciones ----------
+const FILTROS_COLECCIONES = {
+  "": "Todas",
+  cine: "🎬 Películas y series",
+  musica: "🎵 Música",
+  juegos: "🎮 Juegos",
+  mixta: "🔀 Mixtas",
+};
+
+function vistaColecciones() {
+  const usuario = auth.usuarioActual();
+  const filtro = store.leer("filtro_colecciones", "");
+  const pasaFiltro = (c) => !filtro || tipoColeccion(c.items) === filtro;
+  const mias = usuario ? colecciones.deUsuario(usuario) : [];
+  // Las de la comunidad: con algo adentro, las que más gustaron primero
+  const deOtros = colecciones.todas()
+    .filter((c) => c.autor !== usuario && c.items.length && pasaFiltro(c))
+    .sort((a, b) => b.likes.length - a.likes.length || b.editada.localeCompare(a.editada));
+  document.title = `Colecciones · El "Santi"-Grial`;
+
+  return `
+    <h1>📚 Colecciones</h1>
+    <p class="suave">Listas de películas, series, discos y juegos armadas por los usuarios: de un solo tipo o mixtas.</p>
+
+    ${usuario ? `
+      <section class="seccion">
+        <h2>Mis colecciones (${mias.length})</h2>
+        <form class="fila-form" id="form-coleccion-nueva" style="margin-bottom:18px">
+          <input type="text" name="titulo" placeholder="Nombre de la nueva colección…" maxlength="80" required>
+          <button class="btn">Crear colección</button>
+        </form>
+        ${mias.length
+          ? `<div class="grilla">${mias.map((c) => tarjetaColeccion(c, { autor: false })).join("")}</div>`
+          : `<p class="suave">Todavía no armaste colecciones. Creá una acá o desde la página de una película, serie, disco o juego.</p>`}
+      </section>` : `
+      <p class="aviso"><a href="#/login" style="color:var(--acento)">Ingresá</a> para armar tus colecciones.</p>`}
+
+    <section class="seccion">
+      <h2>De la comunidad</h2>
+      <div class="controles">
+        <label>Mostrar
+          <select id="filtro-colecciones">
+            ${Object.entries(FILTROS_COLECCIONES).map(([valor, texto]) =>
+              `<option value="${valor}" ${filtro === valor ? "selected" : ""}>${texto}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      ${deOtros.length
+        ? `<div class="grilla">${deOtros.map((c) => tarjetaColeccion(c)).join("")}</div>`
+        : `<p class="suave">No hay colecciones${filtro ? " de este tipo" : ""} de otros usuarios todavía.</p>`}
+    </section>`;
+}
+
+function eventosColeccionesIndice() {
+  const filtro = document.getElementById("filtro-colecciones");
+  if (filtro) filtro.onchange = () => { store.guardar("filtro_colecciones", filtro.value); recargar(); };
+
+  const form = document.getElementById("form-coleccion-nueva");
+  if (form) form.onsubmit = (e) => {
+    e.preventDefault();
+    const titulo = form.elements.titulo.value.trim();
+    if (titulo) location.hash = `#/coleccion/${colecciones.crear(auth.usuarioActual(), titulo)}`;
+  };
+}
+
+// Resultados del buscador de la página de una colección (para el botón "Agregar")
+let resultadosColeccion = [];
+
+function vistaColeccion(id) {
+  const c = colecciones.de(id);
+  if (!c) return `<div class="aviso error">Esta colección no existe o fue borrada.</div>`;
+  const usuario = auth.usuarioActual();
+  const propia = usuario === c.autor;
+  document.title = `${c.titulo} · Colecciones · El "Santi"-Grial`;
+
+  return `
+    <p class="miga"><a href="#/colecciones">Colecciones</a></p>
+    <div class="cabecera-coleccion">
+      <div class="crece">
+        <h1>${escapar(c.titulo)}</h1>
+        <div class="datos">
+          <span>${linkUsuario(c.autor)}</span>
+          <span>${TIPOS_COLECCION[tipoColeccion(c.items)]}</span>
+          <span>${c.items.length} ${c.items.length === 1 ? "elemento" : "elementos"}</span>
+          <span>Actualizada el ${formatearFecha(c.editada)}</span>
+        </div>
+        ${c.descripcion ? `<p class="descripcion-coleccion">${escapar(c.descripcion)}</p>` : ""}
+      </div>
+      ${usuario && !propia
+        ? `<button class="btn-like ${c.likes.includes(usuario) ? "activo" : ""}" id="like-coleccion">♥ ${c.likes.length}</button>`
+        : `<span class="suave">♥ ${c.likes.length}</span>`}
+    </div>
+
+    ${propia ? `
+      <details class="desplegable">
+        <summary>Editar título y descripción</summary>
+        <form class="form-resena" id="form-editar-coleccion">
+          <input type="text" name="titulo" value="${escapar(c.titulo)}" maxlength="80" required>
+          <textarea name="descripcion" placeholder="¿De qué se trata esta colección?" maxlength="1000">${escapar(c.descripcion)}</textarea>
+          <div class="fila-form">
+            <button type="button" class="btn-link" id="borrar-coleccion">Borrar colección</button>
+            <span class="crece"></span>
+            <button class="btn">Guardar</button>
+          </div>
+        </form>
+      </details>
+
+      <section class="seccion panel" style="margin-top:20px">
+        <h2>Agregar a la colección</h2>
+        <form class="fila-form" id="form-buscar-coleccion">
+          <select name="fuente">
+            <option value="cine">🎬 Películas y series</option>
+            <option value="musica">🎵 Discos</option>
+            <option value="juegos">🎮 Juegos</option>
+          </select>
+          <input type="search" name="q" placeholder="Buscar…" required autocomplete="off">
+          <button class="btn">Buscar</button>
+        </form>
+        <div id="resultados-coleccion"></div>
+      </section>` : ""}
+
+    <section class="seccion">
+      <ol class="items-coleccion">
+        ${c.items.map((item, i) => `
+          <li data-clave="${escapar(item.clave)}">
+            <span class="puesto">${i + 1}</span>
+            <a class="mini-imagen" href="${rutaDeClave(item.clave)}">
+              ${item.imagen ? `<img src="${item.imagen}" alt="" loading="lazy" onerror="this.remove()">` : ""}
+            </a>
+            <div class="crece">
+              <a class="titulo-disco" href="${rutaDeClave(item.clave)}">${escapar(item.titulo)}</a>
+              <div class="suave">${escapar(item.subtitulo)} · ${escapar(item.anio ?? "s/f")}</div>
+              ${item.nota ? `<p class="nota-item">${escapar(item.nota)}</p>` : ""}
+            </div>
+            ${propia ? `
+              <div class="acciones-item">
+                <button class="btn secundario chico" data-mover-item="-1" title="Subir" ${i === 0 ? "disabled" : ""}>↑</button>
+                <button class="btn secundario chico" data-mover-item="1" title="Bajar" ${i === c.items.length - 1 ? "disabled" : ""}>↓</button>
+                <button class="btn secundario chico" data-nota-item title="Nota">✎</button>
+                <button class="btn secundario chico" data-quitar-item title="Quitar">✕</button>
+              </div>` : ""}
+          </li>`).join("")}
+      </ol>
+      ${c.items.length ? "" : `<p class="suave">${propia
+        ? "Esta colección está vacía. Buscá arriba o agregá desde la página de una película, serie, disco o juego."
+        : "Esta colección está vacía."}</p>`}
+    </section>`;
+}
+
+async function buscarParaColeccion(id, fuente, q) {
+  const contenedor = document.getElementById("resultados-coleccion");
+  contenedor.innerHTML = `<p class="suave">Buscando…</p>`;
+
+  if (fuente === "juegos") {
+    const [encontrados, mapa] = await Promise.all([buscarJuegos(q), plataformas().catch(() => ({}))]);
+    const fichas = await fichasDeBusqueda(encontrados, 12);
+    resultadosColeccion = fichas.map((j) => {
+      const datos = juegos.datosDe(j, mapa);
+      return { clave: claveJuego(j.id), titulo: datos.titulo, subtitulo: datos.plataformas || "Juego", imagen: datos.portada, anio: datos.anio ?? "s/f" };
+    });
+  } else if (fuente === "musica") {
+    const datos = await musicbrainz("/release-group", { query: q, limit: 12 });
+    resultadosColeccion = datos["release-groups"].map((rg) => ({
+      clave: claveDisco(rg.id),
+      titulo: rg.title,
+      subtitulo: (rg["artist-credit"] ?? []).map((a) => a.name + (a.joinphrase ?? "")).join(""),
+      imagen: tapaDe(rg.id),
+      anio: rg["first-release-date"]?.slice(0, 4) ?? "s/f",
+    }));
+  } else {
+    const { results } = await tmdb("/search/multi", { query: q });
+    resultadosColeccion = results.filter((r) => ["movie", "tv"].includes(r.media_type)).slice(0, 12).map((r) => ({
+      clave: r.media_type === "tv" ? claveSerie(r.id) : String(r.id),
+      titulo: tituloDe(r),
+      subtitulo: r.media_type === "tv" ? "Serie" : "Película",
+      imagen: r.poster_path ? `${IMG}w342${r.poster_path}` : null,
+      anio: anio(fechaDe(r)),
+    }));
+  }
+
+  contenedor.innerHTML = `
+    <div class="lista-admin">
+      ${resultadosColeccion.map((item, i) => `
+        <div class="fila-admin">
+          ${item.imagen ? `<img class="mini" src="${item.imagen}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="mini sin-poster"></div>`}
+          <span class="crece"><strong>${escapar(item.titulo)}</strong>
+            <span class="suave">${escapar(item.subtitulo)} · ${escapar(item.anio)}</span></span>
+          ${colecciones.contiene(id, item.clave)
+            ? `<span class="suave">Ya está</span>`
+            : `<button class="btn chico" data-agregar-resultado="${i}">+ Agregar</button>`}
+        </div>`).join("") || `<p class="suave">Sin resultados.</p>`}
+    </div>`;
+
+  contenedor.querySelectorAll("[data-agregar-resultado]").forEach((b) => {
+    b.onclick = () => {
+      colecciones.agregarItem(id, resultadosColeccion[Number(b.dataset.agregarResultado)]);
+      recargar();
+    };
+  });
+}
+
+// La última búsqueda de la colección, para repetirla al recargar
+let ultimaBusquedaColeccion = null;
+
+function eventosColeccion(id) {
+  const usuario = auth.usuarioActual();
+  const c = colecciones.de(id);
+  if (!usuario || !c) return;
+
+  const like = document.getElementById("like-coleccion");
+  if (like) like.onclick = () => { colecciones.alternarLike(id, usuario); recargar(); };
+
+  if (usuario !== c.autor) return;
+
+  document.getElementById("form-editar-coleccion").onsubmit = (e) => {
+    e.preventDefault();
+    const titulo = e.target.elements.titulo.value.trim();
+    if (!titulo) return;
+    colecciones.modificar(id, (col) => {
+      col.titulo = titulo;
+      col.descripcion = e.target.elements.descripcion.value.trim();
+    });
+    recargar();
+  };
+
+  document.getElementById("borrar-coleccion").onclick = () => {
+    if (!confirm(`¿Borrar la colección "${c.titulo}"? No se puede deshacer.`)) return;
+    colecciones.borrar(id);
+    location.hash = "#/colecciones";
+  };
+
+  const buscar = document.getElementById("form-buscar-coleccion");
+  buscar.onsubmit = (e) => {
+    e.preventDefault();
+    const q = buscar.elements.q.value.trim();
+    if (!q) return;
+    ultimaBusquedaColeccion = { id, fuente: buscar.elements.fuente.value, q };
+    buscarParaColeccion(id, ultimaBusquedaColeccion.fuente, q).catch((err) => {
+      document.getElementById("resultados-coleccion").innerHTML = avisoError(err);
+    });
+  };
+  // Al recargar (por ejemplo, después de agregar algo) se mantiene la búsqueda
+  if (ultimaBusquedaColeccion?.id === id) {
+    buscar.elements.fuente.value = ultimaBusquedaColeccion.fuente;
+    buscar.elements.q.value = ultimaBusquedaColeccion.q;
+    buscarParaColeccion(id, ultimaBusquedaColeccion.fuente, ultimaBusquedaColeccion.q).catch(() => {});
+  }
+
+  document.querySelectorAll(".items-coleccion li").forEach((li) => {
+    const clave = li.dataset.clave;
+    li.querySelectorAll("[data-mover-item]").forEach((b) => {
+      b.onclick = () => { colecciones.moverItem(id, clave, Number(b.dataset.moverItem)); recargar(); };
+    });
+    li.querySelector("[data-nota-item]").onclick = () => {
+      const actual = c.items.find((x) => x.clave === clave)?.nota ?? "";
+      const nota = prompt("Nota para este elemento (vacía para borrarla):", actual);
+      if (nota === null) return;
+      colecciones.notaItem(id, clave, nota.trim().slice(0, 500));
+      recargar();
+    };
+    li.querySelector("[data-quitar-item]").onclick = () => {
+      colecciones.quitarItem(id, clave);
+      recargar();
+    };
+  });
 }
 
 // ---------- Panel de administración ----------
@@ -2841,23 +3737,25 @@ async function vistaAdmin() {
       </form>
     </section>
 
+    ${Object.entries(GRUPOS).map(([grupo, g]) => `
     <section class="seccion panel">
-      <h2>Tags de música</h2>
-      <p class="suave nota">Para agregarle un tag a un disco, entrá a su página desde <a href="#/musica" style="color:var(--acento)">Música</a>.</p>
+      <h2>Tags de ${g.nombre.toLowerCase()}</h2>
+      <p class="suave nota">Para agregarle un tag a un ${g.singular}, entrá a su página desde
+        <a href="${g.inicio}" style="color:var(--acento)">${g.nombre}</a>.</p>
       <div class="lista-admin">
-        ${Object.entries(tagsMusica.todas()).map(([t, info]) => `
+        ${Object.entries(TAGS_DE[grupo].todas()).map(([t, info]) => `
           <div class="fila-admin">
-            <a class="tag especial" href="${rutaTagMusica(t)}">#${escapar(t)}</a>
-            <span class="suave crece">${escapar(info.descripcion || "Sin descripción")} · ${cantidadDiscos(tagsMusica.discosDe(t).length)}</span>
-            <button class="btn-link" data-borrar-tag-musica="${escapar(t)}">Borrar</button>
-          </div>`).join("") || `<p class="suave">No hay tags de música.</p>`}
+            <a class="tag especial" href="${rutaTagDe(grupo, t)}">#${escapar(t)}</a>
+            <span class="suave crece">${escapar(info.descripcion || "Sin descripción")} · ${cantidadDe(grupo, TAGS_DE[grupo].con(t).length)}</span>
+            <button class="btn-link" data-borrar-tag-grupo="${escapar(t)}" data-grupo="${grupo}">Borrar</button>
+          </div>`).join("") || `<p class="suave">No hay tags de ${g.nombre.toLowerCase()}.</p>`}
       </div>
-      <form id="form-nuevo-tag-musica" class="fila-form">
+      <form class="fila-form form-nuevo-tag-grupo" data-grupo="${grupo}">
         <input type="text" name="nombre" placeholder="Nombre del tag" required>
         <input type="text" name="descripcion" placeholder="Descripción (opcional)">
         <button class="btn">Crear tag</button>
       </form>
-    </section>
+    </section>`).join("")}
 
     <section class="seccion panel">
       <h2>Catálogo <span class="suave" style="font-size:1rem">${cantidadObras(catalogoAdmin)}</span></h2>
@@ -2960,18 +3858,22 @@ function eventosAdmin() {
     };
   });
 
-  document.getElementById("form-nuevo-tag-musica").onsubmit = (e) => {
-    e.preventDefault();
-    const nombre = normalizarTag(e.target.elements.nombre.value);
-    if (!nombre) return;
-    tagsMusica.crear(nombre, e.target.elements.descripcion.value.trim());
-    recargar();
-  };
+  // Tags de música y de juegos
+  document.querySelectorAll(".form-nuevo-tag-grupo").forEach((form) => {
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const nombre = normalizarTag(form.elements.nombre.value);
+      if (!nombre) return;
+      TAGS_DE[form.dataset.grupo].crear(nombre, form.elements.descripcion.value.trim());
+      recargar();
+    };
+  });
 
-  document.querySelectorAll("[data-borrar-tag-musica]").forEach((b) => {
+  document.querySelectorAll("[data-borrar-tag-grupo][data-grupo]").forEach((b) => {
     b.onclick = () => {
-      if (!confirm(`¿Borrar #${b.dataset.borrarTagMusica}? Se quita de todos los discos.`)) return;
-      tagsMusica.borrar(b.dataset.borrarTagMusica);
+      const { grupo, borrarTagGrupo: tag } = b.dataset;
+      if (!confirm(`¿Borrar #${tag}? Se quita de todos los ${GRUPOS[grupo].plural}.`)) return;
+      TAGS_DE[grupo].borrar(tag);
       recargar();
     };
   });
@@ -3018,8 +3920,9 @@ async function vistaBusqueda(q) {
       ${results.length
         ? grupo("Personas", personas, tarjetaPersona) + grupo("Películas", pelis) + grupo("Series", series)
         : `<p class="suave">No se encontraron películas, series ni personas.</p>`}
-      <p class="aviso">¿Buscabas música?
-        <a href="#/musica/buscar/${encodeURIComponent(q)}" style="color:var(--acento)">Buscar "${escapar(q)}" en Música →</a></p>
+      <p class="aviso">¿Buscabas otra cosa?
+        <a href="#/musica/buscar/${encodeURIComponent(q)}" style="color:var(--acento)">Buscar "${escapar(q)}" en Música →</a> ·
+        <a href="#/juegos/buscar/${encodeURIComponent(q)}" style="color:var(--acento)">Buscar "${escapar(q)}" en Juegos →</a></p>
     </section>`;
 }
 
@@ -3090,6 +3993,18 @@ function eventosLogin() {
 // Título, link, imagen y tarjeta de una película, serie, episodio o disco a partir de su clave de ratings/reseñas
 async function obraDeClave(clave) {
   const poster = (ruta) => (ruta ? `${IMG}w92${ruta}` : null);
+
+  const juego = clave.match(/^juego-(\d+)$/);
+  if (juego) {
+    const id = juego[1];
+    let datos = juegos.de(id);
+    if (!datos) {
+      const [ficha, mapa] = await Promise.all([gamedb(`/games/${id}.json`), plataformas().catch(() => ({}))]);
+      juegos.recordar(ficha, mapa);
+      datos = juegos.datosDe(ficha, mapa);
+    }
+    return { titulo: datos.titulo, href: `#/juego/${id}`, imagen: datos.portada, tarjeta: tarjetaJuego(id, datos) };
+  }
 
   const album = clave.match(/^album-([0-9a-f-]{36})$/);
   if (album) {
@@ -3176,7 +4091,12 @@ async function vistaUsuario(nombre) {
 
   return `
     <div class="cabecera-perfil">
-      ${avatar(nombre, true)}
+      ${propio ? `
+        <label class="cambiar-foto" title="Cambiar foto de perfil">
+          ${avatar(nombre, true)}
+          <span class="lapiz">📷</span>
+          <input type="file" id="input-foto" accept="image/*" hidden>
+        </label>` : avatar(nombre, true)}
       <div class="crece">
         <h1>${escapar(nombre)} ${USUARIOS.some((u) => u.usuario === nombre && u.rol === "admin") ? `<span class="insignia">admin</span>` : ""}</h1>
         <div class="puntajes">
@@ -3186,7 +4106,12 @@ async function vistaUsuario(nombre) {
           <div class="puntaje"><div class="valor">${susAmigos.length}</div><div class="etiqueta">Amigos</div></div>
         </div>
       </div>
-      <div class="fila-form">${botonAmistad(nombre)}</div>
+      <div class="fila-form">
+        ${botonAmistad(nombre)}
+        ${propio ? `
+          <label class="btn secundario chico" for="input-foto">📷 ${fotos.de(nombre) ? "Cambiar foto" : "Subir foto"}</label>
+          ${fotos.de(nombre) ? `<button class="btn-link" id="quitar-foto">Quitar foto</button>` : ""}` : ""}
+      </div>
     </div>
 
     ${recibidas.length || enviadas.length ? `
@@ -3226,6 +4151,17 @@ async function vistaUsuario(nombre) {
         </div>
       </section>` : ""}
 
+    ${(() => {
+      const susColecciones = colecciones.deUsuario(nombre).filter((c) => propio || c.items.length);
+      return susColecciones.length || propio ? `
+        <section class="seccion">
+          <h2>Colecciones (${susColecciones.length}) ${propio ? `<a href="#/colecciones">Crear una →</a>` : ""}</h2>
+          ${susColecciones.length
+            ? `<div class="grilla">${susColecciones.map((c) => tarjetaColeccion(c, { autor: false })).join("")}</div>`
+            : `<p class="suave">Todavía no armaste colecciones.</p>`}
+        </section>` : "";
+    })()}
+
     <section class="seccion">
       <h2>Amigos (${susAmigos.length})</h2>
       ${susAmigos.length
@@ -3254,6 +4190,28 @@ async function vistaUsuario(nombre) {
 function eventosUsuario() {
   eventosAmistad();
   eventosLikes();
+
+  const usuario = auth.usuarioActual();
+  const input = document.getElementById("input-foto");
+  if (!input) return;
+  input.onchange = async () => {
+    const archivo = input.files[0];
+    if (!archivo) return;
+    try {
+      fotos.guardar(usuario, await fotos.preparar(archivo));
+      renderZonaUsuario();
+      recargar();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+  const quitar = document.getElementById("quitar-foto");
+  if (quitar) quitar.onclick = () => {
+    if (!confirm("¿Quitar tu foto de perfil?")) return;
+    fotos.guardar(usuario, null);
+    renderZonaUsuario();
+    recargar();
+  };
 }
 
 async function vistaComunidad() {
@@ -3333,9 +4291,15 @@ const rutas = [
   { patron: /^\/perfil$/, vista: vistaPerfil },
   { patron: /^\/usuario\/([^/]+)$/, vista: vistaUsuario, despues: eventosUsuario },
   { patron: /^\/comunidad$/, vista: vistaComunidad, despues: eventosComunidad },
+  { patron: /^\/colecciones$/, vista: vistaColecciones, despues: eventosColeccionesIndice },
+  { patron: /^\/coleccion\/([a-z0-9]+)$/, vista: vistaColeccion, despues: eventosColeccion },
   { patron: /^\/musica$/, vista: vistaMusica, despues: eventosMusica },
   { patron: /^\/musica\/buscar\/(.+)$/, vista: vistaBusquedaMusica, despues: eventosBusquedaMusica },
-  { patron: /^\/musica\/charts(?:\/(\d{4}))?$/, vista: vistaCharts, despues: eventosCharts },
+  { patron: /^\/musica\/charts(?:\/(\d{4}))?$/, vista: (decada) => vistaCharts("musica", decada), despues: eventosCharts },
+  { patron: /^\/juegos$/, vista: vistaJuegos, despues: eventosJuegos },
+  { patron: /^\/juegos\/buscar\/(.+)$/, vista: vistaBusquedaJuegos, despues: eventosBusquedaJuegos },
+  { patron: /^\/juegos\/charts(?:\/(\d{4}))?$/, vista: (decada) => vistaCharts("juegos", decada), despues: eventosCharts },
+  { patron: /^\/juego\/(\d+)$/, vista: vistaJuego, despues: eventosJuego },
   { patron: /^\/artista\/([0-9a-f-]{36})$/, vista: vistaArtista },
   { patron: /^\/album\/([0-9a-f-]{36})$/, vista: vistaAlbum, despues: eventosAlbum },
   { patron: /^\/pelicula\/(\d+)$/, vista: vistaPelicula, despues: eventosPelicula },
@@ -3344,8 +4308,8 @@ const rutas = [
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)$/, vista: vistaTemporada, despues: eventosTemporada },
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)\/episodio\/(\d+)$/, vista: vistaEpisodio, despues: eventosEpisodio },
   { patron: /^\/tags$/, vista: vistaTags, despues: eventosCarruseles },
-  { patron: /^\/tags\/musica$/, vista: vistaTagsMusica, despues: eventosCarruseles },
-  { patron: /^\/tags\/musica\/([^/]+)$/, vista: vistaTagMusica, despues: eventosTagMusica },
+  { patron: /^\/tags\/(musica|juegos)$/, vista: vistaTagsGrupo, despues: eventosCarruseles },
+  { patron: /^\/tags\/(musica|juegos)\/([^/]+)$/, vista: vistaTagGrupo, despues: eventosTagGrupo },
   { patron: /^\/persona\/(\d+)$/, vista: vistaPersona, despues: eventosCarruseles },
   { patron: /^\/tag\/([^/]+)$/, vista: vistaTag, despues: eventosListado },
   { patron: /^\/catalogo$/, vista: vistaCatalogo, despues: eventosListado },
@@ -3395,6 +4359,10 @@ document.getElementById("form-busqueda").onsubmit = (e) => {
 window.addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
   editandoResena = false;
+  coleccionesAbiertas = false;
+  // Cierra el submenú desde el que se navegó (queda abierto mientras tenga el foco)
+  document.activeElement?.blur();
+  marcarMenu();
   router();
 });
 
