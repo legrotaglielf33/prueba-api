@@ -449,3 +449,63 @@ select:focus { outline: none; border-color: var(--acento); }
   .carrusel .pista { grid-auto-columns: 130px; }
   .carrusel .flecha { display: none; }
 }
+
+/* ---------- Personas ---------- */
+.link-persona { color: var(--texto); border-bottom: 1px dotted var(--suave); }
+.link-persona:hover { color: var(--acento); border-color: var(--acento); }
+.actor { transition: transform .15s; }
+.actor:hover { transform: translateY(-3px); color: var(--acento); }
+
+.detalle.persona { padding: 0; margin-bottom: 32px; }
+.detalle.persona .puntajes { margin-top: 8px; }
+
+.biografia { max-width: 820px; }
+.biografia p { line-height: 1.65; color: #d5deeb; margin: 0 0 14px; }
+.biografia h3 { margin: 24px 0 8px; color: var(--acento); }
+.biografia h4 { margin: 18px 0 6px; color: var(--acento-claro); font-size: .95rem; }
+.fuente { font-size: .8rem; color: var(--suave); margin-top: 10px; }
+.fuente a { color: var(--acento); }
+
+.desplegable { margin-top: 10px; }
+.desplegable > summary {
+  cursor: pointer;
+  color: var(--acento);
+  font-weight: 600;
+  padding: 6px 0;
+  list-style: none;
+}
+.desplegable > summary::before { content: "▸ "; }
+.desplegable[open] > summary::before { content: "▾ "; }
+.desplegable > summary::-webkit-details-marker { display: none; }
+
+.filmografia { display: flex; flex-direction: column; }
+.fila-film {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel);
+}
+.fila-film:hover { background: var(--panel); }
+.fila-film a { font-weight: 600; }
+.fila-film a:hover { color: var(--acento); }
+.fila-film .suave { font-size: .85rem; }
+.anio { color: var(--acento); font-variant-numeric: tabular-nums; font-weight: 700; }
+
+.premios { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.premios li {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.premios em { color: var(--acento-claro); }
+
+@media (max-width: 720px) {
+  .fila-film { grid-template-columns: 44px 1fr; }
+  .fila-film .suave { grid-column: 2; }
+}

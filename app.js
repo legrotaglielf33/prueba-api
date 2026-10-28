@@ -146,6 +146,114 @@ async function resolverId(entrada) {
 }
 
 // ---------------------------------------------------------------
+//  Wikipedia y Wikidata (biografías y premios de las personas).
+//  TMDB da el id de Wikidata de cada persona; Wikidata dice cuál es
+//  su artículo de Wikipedia y qué premios recibió.
+// ---------------------------------------------------------------
+const WIKIDATA = "https://www.wikidata.org/w/api.php";
+
+async function apiWiki(base, params) {
+  const url = new URL(base);
+  // origin=* habilita CORS en las APIs de Wikimedia
+  for (const [k, v] of Object.entries({ format: "json", origin: "*", ...params })) url.searchParams.set(k, v);
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Wikipedia respondió ${resp.status}`);
+  return resp.json();
+}
+
+// { [id]: entidad }. Wikidata acepta hasta 50 ids por pedido.
+async function entidadesWikidata(ids, props) {
+  const partes = [];
+  for (let i = 0; i < ids.length; i += 50) partes.push(ids.slice(i, i + 50));
+  const respuestas = await Promise.all(partes.map((p) =>
+    apiWiki(WIKIDATA, { action: "wbgetentities", ids: p.join("|"), props, languages: "es|en" })));
+  return Object.assign({}, ...respuestas.map((r) => r.entities));
+}
+
+function nombreWikidata(entidad) {
+  const nombre = entidad?.labels?.es?.value ?? entidad?.labels?.en?.value ?? null;
+  // Algunos nombres en español son los de artículos de listas ("Anexo:Óscar al mejor actor")
+  return nombre?.replace(/^Anexo:/, "") ?? null;
+}
+
+// Secciones del artículo que no son parte de la biografía
+const SECCIONES_DESCARTADAS = /filmograf|premio|logro|reconocimiento|galard|distincion|nominaci|véase|notas|referencias|bibliograf|enlaces|discograf|obras|trabajos|teatro|televisi|filmography|award|accolade|see also|notes|references|external|works|further reading/i;
+
+// [{ titulo, nivel, parrafos }] — el primer bloque (sin título) es la introducción
+async function biografiaWikipedia(idioma, titulo) {
+  const datos = await apiWiki(`https://${idioma}.wikipedia.org/w/api.php`, {
+    action: "query", prop: "extracts", explaintext: 1, exsectionformat: "wiki", titles: titulo, redirects: 1,
+  });
+  const texto = Object.values(datos.query.pages)[0]?.extract ?? "";
+
+  const secciones = [{ titulo: null, nivel: 1, parrafos: [] }];
+  for (const linea of texto.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const encabezado = linea.match(/^(==+)\s*(.+?)\s*==+$/);
+    if (encabezado) secciones.push({ titulo: encabezado[2], nivel: encabezado[1].length, parrafos: [] });
+    else secciones.at(-1).parrafos.push(linea);
+  }
+
+  // Se descarta cada sección de nivel 2 que no es biografía (con sus subsecciones) y las que no tienen texto
+  let descartando = false;
+  return secciones.filter((s) => {
+    if (s.nivel <= 2) descartando = Boolean(s.titulo) && SECCIONES_DESCARTADAS.test(s.titulo);
+    return !descartando && s.parrafos.length;
+  });
+}
+
+// Premios ganados (P166) y nominaciones (P1411), con año (P585), obra (P1686) y ceremonia (P805)
+async function premiosWikidata(entidad) {
+  const leer = (propiedad) => (entidad.claims?.[propiedad] ?? [])
+    .filter((c) => c.mainsnak.datavalue)
+    .map((c) => {
+      const calificador = (p) => c.qualifiers?.[p]?.[0]?.datavalue?.value;
+      return {
+        premio: c.mainsnak.datavalue.value.id,
+        anio: calificador("P585")?.time?.slice(1, 5) ?? null,
+        obra: calificador("P1686")?.id ?? null,
+        ceremonia: calificador("P805")?.id ?? null,
+      };
+    });
+  const ganados = leer("P166");
+  const nominaciones = leer("P1411");
+
+  const ids = [...new Set([...ganados, ...nominaciones].flatMap((p) => [p.premio, p.obra, p.ceremonia]).filter(Boolean))];
+  const entidades = ids.length ? await entidadesWikidata(ids, "labels") : {};
+  const conNombres = (lista) => lista
+    .map((p) => ({
+      premio: nombreWikidata(entidades[p.premio]),
+      obra: nombreWikidata(entidades[p.obra]),
+      ceremonia: nombreWikidata(entidades[p.ceremonia]),
+      // Si no hay año, a veces está en el nombre de la ceremonia ("Premios Óscar de 1998")
+      anio: p.anio ?? nombreWikidata(entidades[p.ceremonia])?.match(/\b(19|20)\d\d\b/)?.[0] ?? null,
+    }))
+    .filter((p) => p.premio)
+    .sort((a, b) => (b.anio ?? "").localeCompare(a.anio ?? ""));
+
+  return { ganados: conNombres(ganados), nominaciones: conNombres(nominaciones) };
+}
+
+// Biografía y premios de una persona a partir de su id de Wikidata ("Q175535")
+async function datosWiki(wikidataId) {
+  const entidad = (await entidadesWikidata([wikidataId], "sitelinks|claims"))[wikidataId];
+  if (!entidad) return null;
+  // Se prefiere el artículo en español; si no hay, el de inglés
+  const idioma = entidad.sitelinks?.eswiki ? "es" : entidad.sitelinks?.enwiki ? "en" : null;
+  const articulo = idioma ? entidad.sitelinks[`${idioma}wiki`].title : null;
+
+  const [biografia, premios] = await Promise.all([
+    articulo ? biografiaWikipedia(idioma, articulo).catch(() => null) : null,
+    premiosWikidata(entidad).catch(() => ({ ganados: [], nominaciones: [] })),
+  ]);
+  return {
+    idioma,
+    url: articulo ? `https://${idioma}.wikipedia.org/wiki/${encodeURIComponent(articulo.replace(/ /g, "_"))}` : null,
+    biografia,
+    premios,
+  };
+}
+
+// ---------------------------------------------------------------
 //  Usuarios (guardados en el servidor) y sesión (en este navegador)
 // ---------------------------------------------------------------
 // Cuentas creadas desde "Crear cuenta" (las de versiones viejas no eran una lista y se descartan)
@@ -459,6 +567,19 @@ function tarjeta(obra, href = null) {
     </a>`;
 }
 
+function tarjetaPersona(persona) {
+  return `
+    <a class="tarjeta" href="#/persona/${persona.id}">
+      ${persona.profile_path
+        ? `<img class="poster" src="${IMG}w342${persona.profile_path}" alt="${escapar(persona.name)}" loading="lazy">`
+        : `<div class="sin-poster">${escapar(persona.name)}</div>`}
+      <div class="info">
+        <h3>${escapar(persona.name)}</h3>
+        <div class="meta"><span>${escapar(DEPARTAMENTOS[persona.known_for_department] ?? persona.known_for_department ?? "")}</span></div>
+      </div>
+    </a>`;
+}
+
 // Puntaje de TMDB, promedio del sitio y las estrellas del usuario
 function bloquePuntajes(clave, votoTmdb, votosTmdb) {
   const usuario = auth.usuarioActual();
@@ -517,20 +638,26 @@ function seccionComentarios(clave, titulo) {
     </section>`;
 }
 
-// personas: [{ name, profile_path, character }]
+// Links a las páginas de personas: [{ id, name }] → "Fulano, Mengano" (sin repetir)
+function linksPersonas(personas) {
+  const unicas = [...new Map(personas.map((p) => [p.id, p])).values()];
+  return unicas.map((p) => `<a class="link-persona" href="#/persona/${p.id}">${escapar(p.name)}</a>`).join(", ");
+}
+
+// personas: [{ id, name, profile_path, character }]
 function seccionReparto(personas, titulo = "Reparto") {
   return `
     <section class="seccion" style="margin-top:32px">
       <h2>${titulo}</h2>
       <div class="reparto">
         ${personas.slice(0, 12).map((a) => `
-          <div class="actor">
+          <a class="actor" href="#/persona/${a.id}">
             ${a.profile_path
               ? `<img src="${IMG}w185${a.profile_path}" alt="${escapar(a.name)}" loading="lazy">`
               : `<div class="sin-poster">Sin foto</div>`}
             ${escapar(a.name)}
             <span>${escapar(a.character)}</span>
-          </div>`).join("") || `<p class="suave">Sin datos de reparto.</p>`}
+          </a>`).join("") || `<p class="suave">Sin datos de reparto.</p>`}
       </div>
     </section>`;
 }
@@ -781,7 +908,7 @@ async function vistaPelicula(id) {
           ${peli.tagline ? `<p class="eslogan">${escapar(peli.tagline)}</p>` : ""}
           <div class="datos">
             ${peli.runtime ? `<span>⏱ ${Math.floor(peli.runtime / 60)}h ${peli.runtime % 60}m</span>` : ""}
-            ${director ? `<span>🎬 ${escapar(director.name)}</span>` : ""}
+            ${director ? `<span>🎬 ${linksPersonas([director])}</span>` : ""}
             ${peli.original_title !== peli.title ? `<span>Título original: ${escapar(peli.original_title)}</span>` : ""}
           </div>
 
@@ -1123,7 +1250,7 @@ async function vistaSerie(id) {
             <span>📺 ${escapar(ESTADOS_SERIE[serie.status] ?? serie.status)}</span>
             <span>${serie.number_of_seasons} temporadas · ${serie.number_of_episodes} episodios</span>
             ${serie.episode_run_time?.[0] ? `<span>⏱ ${serie.episode_run_time[0]} min</span>` : ""}
-            ${serie.created_by.length ? `<span>🎬 ${serie.created_by.map((c) => escapar(c.name)).join(", ")}</span>` : ""}
+            ${serie.created_by.length ? `<span>🎬 ${linksPersonas(serie.created_by)}</span>` : ""}
             ${serie.networks.length ? `<span>${serie.networks.map((n) => escapar(n.name)).join(", ")}</span>` : ""}
             ${serie.original_name !== serie.name ? `<span>Título original: ${escapar(serie.original_name)}</span>` : ""}
           </div>
@@ -1318,7 +1445,6 @@ async function vistaEpisodio(id, temporada, episodio) {
   const directores = ep.crew.filter((c) => c.job === "Director");
   const guionistas = ep.crew.filter((c) => ["Writer", "Screenplay", "Teleplay"].includes(c.job));
   const titulo = `${codigoEpisodio(temporada, episodio)} · ${ep.name}`;
-  const nombres = (personas) => [...new Set(personas.map((p) => p.name))].map(escapar).join(", ");
 
   document.title = `${serie.name} ${titulo} · El "Santi"-Grial`;
 
@@ -1339,8 +1465,8 @@ async function vistaEpisodio(id, temporada, episodio) {
           <div class="datos">
             ${ep.air_date ? `<span>📅 ${yaSalio(ep.air_date) ? "" : "Se estrena el "}${formatearDia(ep.air_date)}</span>` : ""}
             ${ep.runtime ? `<span>⏱ ${ep.runtime} min</span>` : ""}
-            ${directores.length ? `<span>🎬 ${nombres(directores)}</span>` : ""}
-            ${guionistas.length ? `<span>✍ ${nombres(guionistas)}</span>` : ""}
+            ${directores.length ? `<span>🎬 ${linksPersonas(directores)}</span>` : ""}
+            ${guionistas.length ? `<span>✍ ${linksPersonas(guionistas)}</span>` : ""}
           </div>
 
           <p>${escapar(ep.overview || "Sin sinopsis disponible.")}</p>
@@ -1375,6 +1501,228 @@ function eventosEpisodio(id, temporada, episodio) {
     vistos.marcar(id, usuario, [ep], !vistos.deSerie(id, usuario).has(ep));
     recargar();
   };
+}
+
+// ---------- Personas ----------
+const DEPARTAMENTOS = {
+  Acting: "Actuación",
+  Directing: "Dirección",
+  Writing: "Guion",
+  Production: "Producción",
+  Sound: "Sonido",
+  Camera: "Fotografía",
+  Editing: "Edición",
+  Art: "Arte",
+  "Costume & Make-Up": "Vestuario y maquillaje",
+  "Visual Effects": "Efectos visuales",
+  Crew: "Equipo técnico",
+  Lighting: "Iluminación",
+};
+
+// Programas de entrevistas (10767), noticias (10763) y reality (10764): se dejan fuera de la filmografía
+const GENEROS_APARICIONES = [10767, 10763, 10764];
+
+function esAparicion(credito) {
+  return credito.media_type === "tv" && credito.genre_ids?.some((g) => GENEROS_APARICIONES.includes(g));
+}
+
+// Une los créditos de una misma obra (por ej. dos personajes en la misma película)
+// campo: "character" para el reparto, "job" para el equipo
+function unirCreditos(creditos, campo) {
+  const obras = new Map();
+  for (const c of creditos) {
+    const clave = `${c.media_type}-${c.id}`;
+    const obra = obras.get(clave) ?? { ...c, roles: [] };
+    if (c[campo] && !obra.roles.includes(c[campo])) obra.roles.push(c[campo]);
+    obra.episode_count = Math.max(obra.episode_count ?? 0, c.episode_count ?? 0);
+    obras.set(clave, obra);
+  }
+  // Lo más nuevo primero; lo anunciado sin fecha, antes que todo
+  return [...obras.values()].sort((a, b) => (fechaDe(b) || "9999").localeCompare(fechaDe(a) || "9999"));
+}
+
+function edad(desde, hasta = null) {
+  const inicio = new Date(`${desde}T00:00`);
+  const fin = hasta ? new Date(`${hasta}T00:00`) : new Date();
+  let anios = fin.getFullYear() - inicio.getFullYear();
+  if (fin < new Date(fin.getFullYear(), inicio.getMonth(), inicio.getDate())) anios--;
+  return anios;
+}
+
+// Lista de créditos por año; muestra los primeros y el resto se despliega
+function filmografia(creditos, detalle) {
+  const VISIBLES = 15;
+  const filas = creditos.map((c) => `
+    <div class="fila-film">
+      <span class="anio">${fechaDe(c) ? anio(fechaDe(c)) : "—"}</span>
+      <a href="${rutaObra(c.media_type === "tv" ? "serie" : "pelicula", c.id)}">${escapar(tituloDe(c))}</a>
+      <span class="suave">${detalle(c)}</span>
+    </div>`);
+  return `
+    <div class="filmografia">${filas.slice(0, VISIBLES).join("")}</div>
+    ${filas.length > VISIBLES ? `
+      <details class="desplegable">
+        <summary>Ver ${filas.length - VISIBLES} más</summary>
+        <div class="filmografia">${filas.slice(VISIBLES).join("")}</div>
+      </details>` : ""}`;
+}
+
+function listaPremios(premios) {
+  return `
+    <ul class="premios">
+      ${premios.map((p) => `
+        <li>
+          <span class="anio">${p.anio ?? "—"}</span>
+          <div>
+            <strong>${escapar(p.premio)}</strong>
+            ${p.obra ? `<span class="suave">por</span> <em>${escapar(p.obra)}</em>` : ""}
+          </div>
+        </li>`).join("")}
+    </ul>`;
+}
+
+// Biografía de Wikipedia: la introducción a la vista y el resto desplegable
+function seccionBiografia(persona, wiki) {
+  // Si sólo hay artículo en inglés y TMDB tiene biografía en español, se usa la de TMDB
+  const usarWiki = wiki?.biografia?.length && !(wiki.idioma === "en" && persona.biography);
+  if (!usarWiki && !persona.biography) return "";
+
+  if (!usarWiki) {
+    return `
+      <section class="seccion biografia">
+        <h2>Biografía</h2>
+        ${persona.biography.split(/\n+/).map((p) => `<p>${escapar(p)}</p>`).join("")}
+        <p class="fuente">Fuente: TMDB</p>
+      </section>`;
+  }
+
+  const bloques = wiki.biografia.flatMap((s) => [
+    ...(s.titulo ? [s.nivel <= 2 ? `<h3>${escapar(s.titulo)}</h3>` : `<h4>${escapar(s.titulo)}</h4>`] : []),
+    ...s.parrafos.map((p) => `<p>${escapar(p)}</p>`),
+  ]);
+  const VISIBLES = 3;
+  return `
+    <section class="seccion biografia">
+      <h2>Biografía</h2>
+      ${bloques.slice(0, VISIBLES).join("")}
+      ${bloques.length > VISIBLES ? `
+        <details class="desplegable">
+          <summary>Leer la biografía completa</summary>
+          ${bloques.slice(VISIBLES).join("")}
+        </details>` : ""}
+      <p class="fuente">
+        Fuente: <a href="${wiki.url}" target="_blank" rel="noopener">Wikipedia${wiki.idioma === "en" ? " (en inglés)" : ""}</a>,
+        bajo licencia <a href="https://creativecommons.org/licenses/by-sa/4.0/deed.es" target="_blank" rel="noopener">CC BY-SA 4.0</a>.
+      </p>
+    </section>`;
+}
+
+async function vistaPersona(id) {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  const persona = await tmdb(`/person/${id}`, { append_to_response: "combined_credits,external_ids" });
+  const wikidataId = persona.external_ids?.wikidata_id;
+  const wiki = wikidataId ? await datosWiki(wikidataId).catch(() => null) : null;
+
+  const actuaciones = unirCreditos(persona.combined_credits.cast.filter((c) => !esAparicion(c)), "character");
+  const equipo = unirCreditos(persona.combined_credits.crew, "job");
+  const pelis = actuaciones.filter((c) => c.media_type === "movie");
+  const series = actuaciones.filter((c) => c.media_type === "tv");
+  const apariciones = persona.combined_credits.cast.filter(esAparicion).length;
+
+  // "Conocido por": lo más votado de su departamento principal, sin cameos
+  // (en el reparto, "order" es la posición en los créditos: 0 es el protagonista)
+  const actua = persona.known_for_department === "Acting" || !equipo.length;
+  const candidatas = actua
+    ? actuaciones.filter((c) => c.media_type === "tv" ? c.episode_count >= 5 : (c.order ?? 0) <= 10)
+    : unirCreditos(persona.combined_credits.crew.filter((c) => c.department === persona.known_for_department), "job");
+  const conocidoPor = [...(candidatas.length ? candidatas : actua ? actuaciones : equipo)]
+    .sort((a, b) => b.vote_count - a.vote_count).slice(0, 12);
+
+  const premios = wiki?.premios ?? { ganados: [], nominaciones: [] };
+  const nacimiento = persona.birthday;
+  const muerte = persona.deathday;
+  document.title = `${persona.name} · El "Santi"-Grial`;
+
+  return `
+    <div class="detalle persona">
+      ${persona.profile_path
+        ? `<img class="poster" src="${IMG}h632${persona.profile_path}" alt="${escapar(persona.name)}">`
+        : `<div class="sin-poster">Sin foto</div>`}
+      <div>
+        <h1>${escapar(persona.name)}</h1>
+        <div class="datos">
+          ${persona.known_for_department ? `<span>${escapar(DEPARTAMENTOS[persona.known_for_department] ?? persona.known_for_department)}</span>` : ""}
+          ${nacimiento ? `<span>🎂 ${formatearDia(nacimiento)}${muerte ? "" : ` (${edad(nacimiento)} años)`}</span>` : ""}
+          ${muerte ? `<span>✝ ${formatearDia(muerte)}${nacimiento ? ` (${edad(nacimiento, muerte)} años)` : ""}</span>` : ""}
+          ${persona.place_of_birth ? `<span>📍 ${escapar(persona.place_of_birth)}</span>` : ""}
+        </div>
+        <div class="puntajes">
+          <div class="puntaje">
+            <div class="valor">${pelis.length}</div>
+            <div class="etiqueta">Películas</div>
+          </div>
+          <div class="puntaje">
+            <div class="valor">${series.length}</div>
+            <div class="etiqueta">Series</div>
+          </div>
+          <div class="puntaje">
+            <div class="valor">${premios.ganados.length}</div>
+            <div class="etiqueta">Premios</div>
+          </div>
+          <div class="puntaje">
+            <div class="valor">${premios.nominaciones.length}</div>
+            <div class="etiqueta">Nominaciones</div>
+          </div>
+        </div>
+        <div class="tags">
+          ${wiki?.url ? `<a class="tag" href="${wiki.url}" target="_blank" rel="noopener">Wikipedia ↗</a>` : ""}
+          ${persona.external_ids?.imdb_id ? `<a class="tag" href="https://www.imdb.com/name/${persona.external_ids.imdb_id}/" target="_blank" rel="noopener">IMDb ↗</a>` : ""}
+          <a class="tag" href="https://www.themoviedb.org/person/${persona.id}" target="_blank" rel="noopener">TMDB ↗</a>
+        </div>
+      </div>
+    </div>
+
+    ${seccionBiografia(persona, wiki)}
+
+    ${conocidoPor.length ? `
+      <section class="seccion">
+        <h2>Conocido por</h2>
+        ${carrusel(conocidoPor, conocidoPor.length, "")}
+      </section>` : ""}
+
+    ${premios.ganados.length || premios.nominaciones.length ? `
+      <section class="seccion">
+        <h2>Premios</h2>
+        ${premios.ganados.length ? listaPremios(premios.ganados) : `<p class="suave">No hay premios registrados.</p>`}
+        ${premios.nominaciones.length ? `
+          <details class="desplegable">
+            <summary>Nominaciones (${premios.nominaciones.length})</summary>
+            ${listaPremios(premios.nominaciones)}
+          </details>` : ""}
+        <p class="fuente">Fuente: <a href="https://www.wikidata.org/wiki/${wikidataId}" target="_blank" rel="noopener">Wikidata</a></p>
+      </section>` : ""}
+
+    ${pelis.length ? `
+      <section class="seccion">
+        <h2>Películas <span class="suave" style="font-size:1rem">${pelis.length}</span></h2>
+        ${filmografia(pelis, (c) => c.roles.length ? `como ${escapar(c.roles.join(" / "))}` : "")}
+      </section>` : ""}
+
+    ${series.length ? `
+      <section class="seccion">
+        <h2>Series <span class="suave" style="font-size:1rem">${series.length}</span></h2>
+        ${filmografia(series, (c) => [
+          c.roles.length ? `como ${escapar(c.roles.join(" / "))}` : "",
+          c.episode_count ? `${c.episode_count} ${c.episode_count === 1 ? "episodio" : "episodios"}` : "",
+        ].filter(Boolean).join(" · "))}
+        ${apariciones ? `<p class="suave nota">Sin contar ${apariciones} apariciones en programas de entrevistas, noticias o reality.</p>` : ""}
+      </section>` : ""}
+
+    ${equipo.length ? `
+      <section class="seccion">
+        <h2>Detrás de cámara <span class="suave" style="font-size:1rem">${equipo.length}</span></h2>
+        ${filmografia(equipo, (c) => escapar(c.roles.join(", ")))}
+      </section>` : ""}`;
 }
 
 // ---------- Panel de administración ----------
@@ -1641,22 +1989,23 @@ function eventosAdmin() {
 async function vistaBusqueda(q) {
   if (!hayCredenciales()) return avisoSinCredenciales();
   q = decodeURIComponent(q);
-  // /search/multi trae películas, series y personas; las personas no se muestran
+  // /search/multi trae películas, series y personas
   const { results } = await tmdb("/search/multi", { query: q });
   const pelis = results.filter((r) => r.media_type === "movie");
   const series = results.filter((r) => r.media_type === "tv");
+  const personas = results.filter((r) => r.media_type === "person");
   document.title = `Buscar "${q}" · El "Santi"-Grial`;
 
-  const grupo = (titulo, lista) => lista.length ? `
+  const grupo = (titulo, lista, dibujar = (o) => tarjeta(o)) => lista.length ? `
     <h3 class="titulo-genero">${titulo} <span class="suave">(${lista.length})</span></h3>
-    <div class="grilla">${lista.map((o) => tarjeta(o)).join("")}</div>` : "";
+    <div class="grilla">${lista.map(dibujar).join("")}</div>` : "";
 
   return `
     <section class="seccion">
       <h2>Resultados para "${escapar(q)}"</h2>
-      ${pelis.length || series.length
-        ? grupo("Películas", pelis) + grupo("Series", series)
-        : `<p class="suave">No se encontraron películas ni series.</p>`}
+      ${results.length
+        ? grupo("Personas", personas, tarjetaPersona) + grupo("Películas", pelis) + grupo("Series", series)
+        : `<p class="suave">No se encontraron películas, series ni personas.</p>`}
     </section>`;
 }
 
@@ -1822,6 +2171,7 @@ const rutas = [
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)$/, vista: vistaTemporada, despues: eventosTemporada },
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)\/episodio\/(\d+)$/, vista: vistaEpisodio, despues: eventosEpisodio },
   { patron: /^\/tags$/, vista: vistaTags, despues: eventosCarruseles },
+  { patron: /^\/persona\/(\d+)$/, vista: vistaPersona, despues: eventosCarruseles },
   { patron: /^\/tag\/([^/]+)$/, vista: vistaTag, despues: eventosListado },
   { patron: /^\/catalogo$/, vista: vistaCatalogo, despues: eventosListado },
   { patron: /^\/admin$/, vista: vistaAdmin, despues: eventosAdmin },
