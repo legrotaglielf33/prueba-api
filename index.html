@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>El "Santi"-Grial</title>
+  <link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+  <header class="barra">
+    <a href="#/" class="logo">El <span>"Santi"</span>-Grial</a>
+    <nav id="menu">
+      <a href="#/">Inicio</a>
+    </nav>
+    <form id="form-busqueda" class="busqueda">
+      <input type="search" name="q" placeholder="Buscar películas..." autocomplete="off">
+    </form>
+    <div id="zona-usuario" class="zona-usuario"></div>
+  </header>
+
+  <main id="app"></main>
+
+  <footer class="pie">
+    Datos e imágenes de <a href="https://www.themoviedb.org" target="_blank" rel="noopener">TMDB</a>.
+    Este producto usa la API de TMDB pero no está avalado ni certificado por TMDB.
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="datos/tags.js"></script>
+  <script src="datos/peliculas.js"></script>
+  <script src="datos/usuarios.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
