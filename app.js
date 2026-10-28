@@ -685,8 +685,7 @@ function renderMenu() {
     <a href="#/">Inicio</a>
     <a href="#/catalogo">Catálogo</a>
     <a href="#/series">Series</a>
-    ${Object.keys(etiquetas.todas()).map((t) =>
-      `<a href="#/tag/${encodeURIComponent(t)}">#${escapar(t)}</a>`).join("")}
+    <a href="#/tags">Tags</a>
     ${auth.esAdmin() ? `<a href="#/admin">⚙ Admin</a>` : ""}`;
 }
 
@@ -903,6 +902,71 @@ function datalistTags() {
   return `<datalist id="lista-tags">
     ${Object.keys(etiquetas.todas()).map((t) => `<option value="${escapar(t)}">`).join("")}
   </datalist>`;
+}
+
+// ---------- Índice de tags: una fila con carrusel por cada tag ----------
+const CANTIDAD_CARRUSEL = 12;
+
+function carrusel(obras, total, rutaTodas) {
+  return `
+    <div class="carrusel">
+      <button class="flecha anterior" data-mover="-1" aria-label="Anterior">‹</button>
+      <div class="pista">
+        ${obras.map((o) => tarjeta(o)).join("")}
+        ${total > obras.length ? `
+          <a class="tarjeta ver-todas" href="${rutaTodas}">
+            <span>Ver todas<br><strong>${total}</strong></span>
+          </a>` : ""}
+      </div>
+      <button class="flecha siguiente" data-mover="1" aria-label="Siguiente">›</button>
+    </div>`;
+}
+
+async function vistaTags() {
+  if (!hayCredenciales()) return avisoSinCredenciales();
+  const tags = etiquetas.todas();
+  const filas = await Promise.all(Object.keys(tags).map(async (tag) => {
+    const obras = await catalogo.deTag(tag);
+    return { tag, obras, detalles: await detallesDe(obras.slice(0, CANTIDAD_CARRUSEL)) };
+  }));
+  document.title = `Tags · El "Santi"-Grial`;
+
+  return `
+    <section class="seccion">
+      <h2>Tags</h2>
+      ${filas.map(({ tag, obras, detalles }) => {
+        const ruta = `#/tag/${encodeURIComponent(tag)}`;
+        return `
+          <div class="fila-tag">
+            <h3>
+              <a class="tag especial grande" href="${ruta}">#${escapar(tag)}</a>
+              <span class="suave">${obras.length ? cantidadObras(obras) : ""}</span>
+              ${obras.length ? `<a class="ver-tag" href="${ruta}">Ver todas →</a>` : ""}
+            </h3>
+            ${tags[tag].descripcion ? `<p class="suave">${escapar(tags[tag].descripcion)}</p>` : ""}
+            ${detalles.length
+              ? carrusel(detalles, obras.length, ruta)
+              : `<p class="suave">Todavía no hay películas ni series con este tag.</p>`}
+          </div>`;
+      }).join("") || `<p class="suave">Todavía no hay tags.</p>`}
+    </section>`;
+}
+
+// Flechas de los carruseles: corren la pista casi un ancho de pantalla
+function eventosCarruseles() {
+  document.querySelectorAll(".carrusel").forEach((c) => {
+    const pista = c.querySelector(".pista");
+    // Con unos píxeles de margen: el scroll-snap puede dejar la pista corrida por el padding
+    const actualizar = () => {
+      c.querySelector(".anterior").disabled = pista.scrollLeft <= 5;
+      c.querySelector(".siguiente").disabled = pista.scrollLeft + pista.clientWidth >= pista.scrollWidth - 5;
+    };
+    c.querySelectorAll("[data-mover]").forEach((b) => {
+      b.onclick = () => pista.scrollBy({ left: Number(b.dataset.mover) * pista.clientWidth * 0.8, behavior: "smooth" });
+    });
+    pista.onscroll = actualizar;
+    actualizar();
+  });
 }
 
 async function vistaTag(tag) {
@@ -1757,6 +1821,7 @@ const rutas = [
   { patron: /^\/serie\/(\d+)$/, vista: vistaSerie, despues: eventosSerie },
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)$/, vista: vistaTemporada, despues: eventosTemporada },
   { patron: /^\/serie\/(\d+)\/temporada\/(\d+)\/episodio\/(\d+)$/, vista: vistaEpisodio, despues: eventosEpisodio },
+  { patron: /^\/tags$/, vista: vistaTags, despues: eventosCarruseles },
   { patron: /^\/tag\/([^/]+)$/, vista: vistaTag, despues: eventosListado },
   { patron: /^\/catalogo$/, vista: vistaCatalogo, despues: eventosListado },
   { patron: /^\/admin$/, vista: vistaAdmin, despues: eventosAdmin },

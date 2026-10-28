@@ -392,3 +392,60 @@ select:focus { outline: none; border-color: var(--acento); }
 @media (max-width: 720px) {
   .episodio { grid-template-columns: 1fr; }
 }
+
+/* ---------- Índice de tags y carruseles ---------- */
+.fila-tag { margin-bottom: 36px; }
+.fila-tag h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin: 0 0 6px; }
+.fila-tag h3 .suave { font-size: .9rem; font-weight: 400; }
+.fila-tag > p { margin: 0 0 12px; font-size: .9rem; }
+.tag.grande { font-size: 1.15rem; padding: 6px 14px; }
+.tag.grande:hover { background: var(--acento-claro); }
+.ver-tag { margin-left: auto; font-size: .9rem; font-weight: 500; color: var(--acento); }
+
+.carrusel { position: relative; }
+.carrusel .pista {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 160px;
+  gap: 16px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  padding: 6px 2px 10px;
+}
+.carrusel .pista::-webkit-scrollbar { display: none; }
+.carrusel .tarjeta { scroll-snap-align: start; }
+.carrusel .ver-todas {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--acento);
+  border: 2px dashed var(--panel-2);
+  background: transparent;
+}
+.carrusel .ver-todas strong { font-size: 1.6rem; }
+
+.carrusel .flecha {
+  position: absolute;
+  top: 40%;
+  z-index: 2;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(6, 23, 46, .85);
+  color: var(--acento);
+  font-size: 1.8rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px var(--panel-2);
+}
+.carrusel .flecha:hover { background: var(--primario); }
+.carrusel .flecha:disabled { display: none; }
+.carrusel .anterior { left: -12px; }
+.carrusel .siguiente { right: -12px; }
+
+@media (max-width: 720px) {
+  .carrusel .pista { grid-auto-columns: 130px; }
+  .carrusel .flecha { display: none; }
+}
